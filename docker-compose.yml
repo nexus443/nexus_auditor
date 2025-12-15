@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # --- BACKEND (Python FastAPI) ---
+  nexus-backend:
+    build: 
+      context: ./backend  # Pointe vers le dossier backend à la racine
+      dockerfile: Dockerfile
+    container_name: nexus-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434/api/generate
+      - TITAN_MODEL=qwen2.5-coder:32b
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # On lie ces dossiers pour voir les résultats sur Windows
+      - ./audit_logs:/app/audit_logs
+      - ./audit_history.json:/app/audit_history.json
+    restart: unless-stopped
+    healthcheck:
+      # On teste la racine "/" car "/health" n'existe pas encore dans ton main.py
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/', timeout=5)" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - nexus-network
+
+  # --- FRONTEND (React + Nginx) ---
+  nexus-frontend:
+    build: 
+      context: ./frontend # Pointe vers le dossier frontend à la racine
+      dockerfile: Dockerfile
+    container_name: nexus-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      nexus-backend:
+        condition: service_healthy # Attend que le backend soit vert avant de se lancer
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/" ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    networks:
+      - nexus-network
+
+networks:
+  nexus-network:
+    driver: bridge

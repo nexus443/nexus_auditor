@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "High",
+    "line": 156,
+    "description": "The code does not sanitize user input before executing commands, which could lead to command injection.",
+    "fix": "Sanitize and validate all user inputs before using them in system calls or shell commands.",
+    "type": "RCE",
+    "confidence": 80,
+    "reasoning": {
+        "pattern": "The code does not show any input validation or sanitization for the commands being executed. This is a common pattern where attackers can inject malicious commands into the application.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker could exploit this vulnerability by injecting a command such as `; rm -rf /` into an input field that is used to execute shell commands, potentially leading to complete system compromise."
+    }
+}

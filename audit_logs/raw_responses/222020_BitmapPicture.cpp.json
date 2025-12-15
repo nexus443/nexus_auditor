@@ -1,0 +1,7 @@
+{
+  "title": "Potential Memory Leak",
+  "severity": "High",
+  "line": 24,
+  "description": "The destructor of CBitmapPicture does not check if m_hBitmap is NULL before deleting it. If the object is constructed without setting a bitmap, this could lead to a double delete or an attempt to delete a NULL pointer.",
+  "fix": "Add a NULL check in the destructor to ensure that m_hBitmap is not NULL before attempting to delete it."
+}

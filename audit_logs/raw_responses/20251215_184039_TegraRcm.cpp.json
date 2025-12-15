@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "Critical",
+    "line": 5,
+    "description": "The code constructs a command string by concatenating user input (args) with a path (csPath). This can lead to command injection if the args variable contains malicious input.",
+    "fix": "Use parameterized commands or properly sanitize and validate user inputs before constructing system commands.",
+    "type": "RCE",
+    "confidence": 90,
+    "reasoning": {
+        "pattern": "Concatenation of user input with a command string without validation.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker can inject malicious commands by providing specially crafted input for the args variable, such as '; rm -rf /;'."
+    }
+}

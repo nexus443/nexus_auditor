@@ -1,0 +1,14 @@
+{
+    "title": "Insecure Direct Object Reference (IDOR)",
+    "severity": "High",
+    "line": 5,
+    "description": "The code allows direct access to resources based on user input. This could potentially lead to unauthorized data access.",
+    "fix": "Implement proper authorization checks before accessing sensitive data.",
+    "type": "IDOR",
+    "confidence": 80,
+    "reasoning": {
+        "pattern": "Direct object reference based on user input",
+        "cve_refs": ["CVE-2019-16475"],
+        "exploit_example": "An attacker could manipulate the request to access unauthorized data."
+    }
+}

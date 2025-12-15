@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in SHGetFolderPath",
+    "severity": "High",
+    "line": 125,
+    "description": "The function SHGetFolderPath is used to retrieve the path of a special folder, but it does not check if the buffer size is sufficient. This can lead to a buffer overflow if the returned path exceeds MAX_PATH characters.",
+    "fix": "Use the newer SHGetKnownFolderPath function which allows specifying the buffer size and returns an error code if the buffer is too small."
+}

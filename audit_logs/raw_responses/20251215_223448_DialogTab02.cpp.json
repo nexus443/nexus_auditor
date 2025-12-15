@@ -1,0 +1,14 @@
+{
+    "title": "Buffer Overflow",
+    "severity": "High",
+    "line": 5,
+    "description": "The code appends a string to 's' without checking if there is enough space in the buffer, which can lead to a buffer overflow.",
+    "fix": "Use safer functions like strncat or ensure that the buffer size is checked before appending strings.",
+    "type": "Buffer Overflow",
+    "confidence": 85,
+    "reasoning": {
+        "pattern": "Appending strings without checking buffer size",
+        "cve_refs": ["CVE-2014-6324"],
+        "exploit_example": "An attacker could exploit this vulnerability by sending a long string to the application, causing it to overwrite adjacent memory and potentially execute arbitrary code."
+    }
+}

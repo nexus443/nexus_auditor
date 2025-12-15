@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in GetModuleFileName",
+    "severity": "High",
+    "line": 125,
+    "description": "The function GetModuleFileName is used to retrieve the fully qualified path for the executable that contains the specified module. If the buffer provided (szPath) is not large enough to hold the returned string, it will result in a buffer overflow.",
+    "fix": "Ensure that the buffer size passed to GetModuleFileName is sufficient to accommodate the longest possible path name. Consider using MAX_PATH or a larger value if necessary."
+}

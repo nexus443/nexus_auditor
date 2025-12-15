@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in readDeviceId",
+    "severity": "High",
+    "line": 126,
+    "description": "The function readDeviceId does not check if the input buffer size is less than 0x10, which could lead to a buffer overflow.",
+    "fix": "Add a check to ensure that outBufSize is at least 0x10 before proceeding with the read operation."
+}

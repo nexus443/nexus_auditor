@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "Critical",
+    "line": 178,
+    "description": "The code constructs a command string using user input without proper sanitization or validation, which can lead to command injection.",
+    "fix": "Use parameterized commands or properly escape and validate user inputs before constructing the command string.",
+    "type": "RCE",
+    "confidence": 90,
+    "reasoning": {
+        "pattern": "The code constructs a command string using user input without proper sanitization or validation, which can lead to command injection.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker could provide a malicious payload in the file path that includes shell metacharacters (e.g., `; rm -rf /`). When this payload is executed, it would lead to arbitrary command execution on the system."
+    }
+}

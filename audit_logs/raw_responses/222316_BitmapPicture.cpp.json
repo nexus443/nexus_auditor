@@ -1,0 +1,7 @@
+{
+  "title": "Potential Memory Leak",
+  "severity": "High",
+  "line": 27,
+  "description": "The destructor of CBitmapPicture does not check if m_hBitmap is NULL before deleting it. If the object is constructed without setting a bitmap, this could lead to an attempt to delete a NULL pointer.",
+  "fix": "Add a NULL check in the destructor: `if (m_hBitmap) ::DeleteObject(m_hBitmap);`"
+}

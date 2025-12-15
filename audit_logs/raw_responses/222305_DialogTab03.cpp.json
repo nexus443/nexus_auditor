@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in SHGetFolderPath",
+    "severity": "High",
+    "line": 123,
+    "description": "The function SHGetFolderPath is used to retrieve the path of a special folder, but it does not check if the buffer provided (szPath) is large enough. This can lead to a buffer overflow if the path length exceeds MAX_PATH.",
+    "fix": "Use the newer SHGetKnownFolderPath function which provides better handling for longer paths and returns a pointer to a string that must be freed with CoTaskMemFree."
+}

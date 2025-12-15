@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "Critical",
+    "line": 158,
+    "description": "The code constructs command strings using user input without proper validation or sanitization, which can lead to command injection vulnerabilities.",
+    "fix": "Validate and sanitize all user inputs before constructing command strings. Use parameterized commands or APIs that prevent command execution through string manipulation.",
+    "type": "RCE",
+    "confidence": 90,
+    "reasoning": {
+        "pattern": "The code uses `_tcscpy_s` to copy user input into a buffer without validation, which can lead to command injection if the input contains malicious characters.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker could provide a specially crafted input that includes shell metacharacters (e.g., `; rm -rf /`) to execute arbitrary commands on the system."
+    }
+}

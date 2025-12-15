@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in readDeviceId",
+    "severity": "High",
+    "line": 123,
+    "description": "The function readDeviceId does not check if the input buffer size is exactly 0x10 bytes. If a smaller buffer is passed, it could lead to a buffer overflow.",
+    "fix": "Modify the readDeviceId function to ensure that the output buffer size is exactly 0x10 bytes before proceeding with the read operation."
+}

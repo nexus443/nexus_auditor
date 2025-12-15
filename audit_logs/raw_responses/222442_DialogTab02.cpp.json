@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in _tcscpy_s",
+    "severity": "High",
+    "line": 147,
+    "description": "_tcscpy_s is used to copy strings into a fixed-size buffer (args). However, the size of args is 256 characters, and the source string can be longer than this. This could lead to a buffer overflow if the source string exceeds 255 characters.",
+    "fix": "Use _tcsncpy_s instead of _tcscpy_s to ensure that the destination buffer does not overflow. Also, check the length of the source string before copying it."
+}

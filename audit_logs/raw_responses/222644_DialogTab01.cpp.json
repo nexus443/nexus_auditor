@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in Command String Construction",
+    "severity": "High",
+    "line": 147,
+    "description": "The command string 'cmd' is constructed using lstrcat without checking if it exceeds the MAX_PATH limit. This could lead to a buffer overflow.",
+    "fix": "Use safer string handling functions like _snprintf_s or std::string to construct the command string."
+}

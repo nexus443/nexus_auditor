@@ -1,0 +1,7 @@
+{
+    "title": "Buffer Overflow in _tcscpy_s",
+    "severity": "High",
+    "line": 3,
+    "description": "_tcscpy_s is used to copy the string csPath into cmd, but it does not check if the length of csPath exceeds 4095 characters. This could lead to a buffer overflow.",
+    "fix": "Ensure that the length of csPath does not exceed 4095 characters before copying it into cmd."
+}

@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "Critical",
+    "line": 168,
+    "description": "The code constructs a command string using user input from the combo box and executes it without proper validation or sanitization.",
+    "fix": "Validate and sanitize all user inputs before constructing command strings. Use parameterized commands or avoid shell execution where possible.",
+    "type": "RCE",
+    "confidence": 90,
+    "reasoning": {
+        "pattern": "User input is directly used to construct a command string that is executed by the system.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker could select an option in the combo box that includes malicious characters or commands, leading to arbitrary command execution on the system."
+    }
+}

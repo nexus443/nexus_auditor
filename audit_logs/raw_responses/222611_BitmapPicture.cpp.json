@@ -1,0 +1,7 @@
+{
+  "title": "Potential Memory Leak",
+  "severity": "High",
+  "line": 15,
+  "description": "The destructor of CBitmapPicture does not check if the bitmap handle is valid before deleting it. If m_hBitmap is NULL, this will lead to a memory leak.",
+  "fix": "Add a check in the destructor to ensure that m_hBitmap is not NULL before calling DeleteObject."
+}

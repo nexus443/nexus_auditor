@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Logs & runtime
+audit_logs/
+audit_history.json
+*.log
+
+# Ollama / Models
+*.gguf
+
+# Node / Frontend
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env

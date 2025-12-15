@@ -1,0 +1,7 @@
+{
+    "title": "Hardcoded Restart Manager Support",
+    "severity": "Low",
+    "line": 27,
+    "description": "The application enables the Restart Manager support flag without any checks or conditions. This might not be necessary for all use cases and could potentially expose unnecessary functionality.",
+    "fix": "Consider removing or conditionally enabling the Restart Manager support based on specific requirements."
+}

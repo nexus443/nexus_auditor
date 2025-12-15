@@ -1,0 +1,7 @@
+{
+    "title": "Potential Buffer Overflow in StringCchCopy",
+    "severity": "High",
+    "line": 134,
+    "description": "The function StringCchCopy is used to copy strings, but it does not check if the destination buffer size is sufficient. This can lead to a buffer overflow if the source string is longer than the destination buffer.",
+    "fix": "Ensure that the destination buffer size is checked before using StringCchCopy. Alternatively, consider using safer functions like std::wstring::copy or std::wstring::assign."
+}

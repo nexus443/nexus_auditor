@@ -1,0 +1,14 @@
+{
+    "title": "Command Injection",
+    "severity": "Critical",
+    "line": 285,
+    "description": "The code constructs a command string using user input without proper sanitization or validation, which can lead to command injection.",
+    "fix": "Sanitize and validate all user inputs before constructing command strings. Use safer alternatives like parameterized commands or avoid shell execution if possible.",
+    "type": "RCE",
+    "confidence": 90,
+    "reasoning": {
+        "pattern": "Concatenation of user input into a command string without validation.",
+        "cve_refs": ["CVE-2014-6271"],
+        "exploit_example": "An attacker can inject malicious commands by manipulating the payload file path."
+    }
+}

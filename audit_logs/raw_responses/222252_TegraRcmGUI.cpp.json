@@ -1,0 +1,7 @@
+{
+    "title": "Hardcoded Restart Manager Support",
+    "severity": "Low",
+    "line": 23,
+    "description": "The application enables Restart Manager support unconditionally. This might not be necessary and could potentially expose the application to unnecessary restarts or conflicts with other applications.",
+    "fix": "Consider removing or conditionally enabling Restart Manager support based on specific requirements."
+}

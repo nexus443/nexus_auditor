@@ -1,0 +1,14 @@
+{
+    "title": "Resource Loading Vulnerability",
+    "severity": "Medium",
+    "line": 56,
+    "description": "The code loads resources using `::LoadImage` without validating the input. This could potentially lead to loading arbitrary resources if an attacker can control the resource ID or name.",
+    "fix": "Validate and sanitize the resource ID or name before loading it.",
+    "type": "Resource Loading",
+    "confidence": 80,
+    "reasoning": {
+        "pattern": "Use of `::LoadImage` with user-controlled input without validation.",
+        "cve_refs": ["CVE-2019-1458"],
+        "exploit_example": "An attacker could exploit this by providing a crafted resource ID or name that points to a malicious DLL, leading to arbitrary code execution."
+    }
+}

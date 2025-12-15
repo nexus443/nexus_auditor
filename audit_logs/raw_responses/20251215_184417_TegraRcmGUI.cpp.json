@@ -1,0 +1,14 @@
+{
+    "title": "Insecure Direct Object Reference (IDOR)",
+    "severity": "High",
+    "line": 50,
+    "description": "The application allows unauthorized access to sensitive data by directly referencing objects.",
+    "fix": "Implement proper authorization checks before accessing any object. Use a mapping system that maps user roles and permissions to the actual objects they are allowed to access.",
+    "type": "Authentication Bypass",
+    "confidence": 80,
+    "reasoning": {
+        "pattern": "Directly referencing objects without proper authorization checks. This can lead to unauthorized data access or manipulation.",
+        "cve_refs": ["CVE-2017-9043"],
+        "exploit_example": "An attacker could exploit this vulnerability by directly referencing objects that they are not supposed to access."
+    }
+}

@@ -1,0 +1,7 @@
+{
+    "title": "Potential Null Pointer Dereference",
+    "severity": "High",
+    "line": 42,
+    "description": "The code does not check if m_Dialog[nSel] is null before calling ShowWindow on it. If m_Dialog[nSel] is null, this will result in a null pointer dereference.",
+    "fix": "Add a null check for m_Dialog[nSel] before calling ShowWindow."
+}

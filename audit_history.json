@@ -1,0 +1,118 @@
+[
+  {
+    "id": "42ff34a6",
+    "date": "2025-12-15T22:40:32.574041",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 5,
+      "high": 5,
+      "medium": 1,
+      "low": 3,
+      "files": 10
+    },
+    "confidence_score": 92.64,
+    "score": -50,
+    "successful_analyses": 14,
+    "failed_analyses": 0
+  },
+  {
+    "id": "a054656c",
+    "date": "2025-12-15T22:26:11.533425",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 11,
+      "medium": 1,
+      "low": 2,
+      "files": 10
+    },
+    "score": -10
+  },
+  {
+    "id": "4f3b8db4",
+    "date": "2025-12-15T22:23:16.212946",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 11,
+      "medium": 1,
+      "low": 2,
+      "files": 10
+    },
+    "score": -10
+  },
+  {
+    "id": "3ee93fec",
+    "date": "2025-12-15T22:20:20.422419",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 11,
+      "medium": 1,
+      "low": 2,
+      "files": 10
+    },
+    "score": -10
+  },
+  {
+    "id": "dcec5a2a",
+    "date": "2025-12-15T19:13:23.515926",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 14,
+      "files": 10
+    },
+    "score": 100
+  },
+  {
+    "id": "7694c6f6",
+    "date": "2025-12-15T19:12:28.954646",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 14,
+      "files": 10
+    },
+    "score": 100
+  },
+  {
+    "id": "c490f0bd",
+    "date": "2025-12-15T19:11:36.017386",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 14,
+      "files": 10
+    },
+    "score": 100
+  },
+  {
+    "id": "938eae93",
+    "date": "2025-12-15T19:10:43.500279",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 14,
+      "files": 10
+    },
+    "score": 100
+  }
+]

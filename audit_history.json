@@ -1,5 +1,59 @@
 [
   {
+    "id": "95095991",
+    "date": "2025-12-17T13:03:05.278992",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "rapid",
+    "stats": {
+      "critical": 1,
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "files": 4
+    },
+    "confidence_score": 92.5,
+    "score": 70,
+    "successful_analyses": 7,
+    "failed_analyses": 0
+  },
+  {
+    "id": "272acf81",
+    "date": "2025-12-16T23:50:49.894445",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "rapid",
+    "stats": {
+      "critical": 2,
+      "high": 2,
+      "medium": 0,
+      "low": 3,
+      "files": 4
+    },
+    "confidence_score": 92.0,
+    "score": 40,
+    "successful_analyses": 7,
+    "failed_analyses": 0
+  },
+  {
+    "id": "b10dbf0c",
+    "date": "2025-12-16T22:18:24.659458",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 2,
+      "high": 4,
+      "medium": 0,
+      "low": 5,
+      "files": 6
+    },
+    "confidence_score": 89.18,
+    "score": 20,
+    "successful_analyses": 11,
+    "failed_analyses": 2
+  },
+  {
     "id": "42ff34a6",
     "date": "2025-12-15T22:40:32.574041",
     "target": "https://github.com/eliboa/TegraRcmGUI.git",

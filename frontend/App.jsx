@@ -322,17 +322,98 @@ export default function App() {
                         </div>
 
                         <div>
-                           <label className={`block text-xs font-semibold uppercase tracking-wider mb-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
+                           <label className={`block text-xs font-semibold uppercase tracking-wider mb-3 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
                               }`}>Mode de Scan</label>
-                           <div className="flex gap-2">
-                              <button onClick={() => setScanMode('rapid')} className={`flex-1 p-2 rounded-lg border transition-all flex justify-center items-center ${scanMode === 'rapid' ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400' : theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-300 text-slate-600'}`} title="Rapide">
-                                 <Zap className="w-5 h-5" />
+
+                           <div className="grid grid-cols-1 gap-3">
+                              {/* ⚡ Scan Rapide */}
+                              <button
+                                 onClick={() => setScanMode('rapid')}
+                                 className={`relative p-6 rounded-xl border-2 transition-all text-left ${scanMode === 'rapid'
+                                    ? 'border-emerald-500 bg-emerald-500/10 shadow-[0_0_20px_rgba(16,185,129,0.3)]'
+                                    : theme === 'dark'
+                                       ? 'border-slate-800 bg-slate-950 hover:border-emerald-500/50'
+                                       : 'border-slate-300 bg-slate-100 hover:border-emerald-500/50'
+                                    }`}
+                              >
+                                 {scanMode === 'rapid' && (
+                                    <div className="absolute top-4 right-4">
+                                       <CheckCircle className="w-6 h-6 text-emerald-500" />
+                                    </div>
+                                 )}
+                                 <div className={`flex items-center gap-2 mb-3 ${scanMode === 'rapid' ? 'text-emerald-400' : theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'
+                                    }`}>
+                                    <Zap className="w-7 h-7" />
+                                    <h3 className="font-semibold text-base">Scan Rapide</h3>
+                                 </div>
+                                 <p className={`text-sm mb-3 leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
+                                    }`}>
+                                    Détecte rapidement les vulnérabilités les plus courantes
+                                 </p>
+                                 <div className={`text-sm font-medium ${scanMode === 'rapid' ? 'text-emerald-400' : theme === 'dark' ? 'text-slate-500' : 'text-slate-500'
+                                    }`}>
+                                    ⏱ 1-2 min • 🎯 Essentiel
+                                 </div>
                               </button>
-                              <button onClick={() => setScanMode('deep')} className={`flex-1 p-2 rounded-lg border transition-all flex justify-center items-center ${scanMode === 'deep' ? 'bg-indigo-500/10 border-indigo-500 text-indigo-400' : theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-300 text-slate-600'}`} title="Profond">
-                                 <Layers className="w-5 h-5" />
+
+                              {/* 🧠 Scan Profond */}
+                              <button
+                                 onClick={() => setScanMode('deep')}
+                                 className={`relative p-6 rounded-xl border-2 transition-all text-left ${scanMode === 'deep'
+                                    ? 'border-indigo-500 bg-indigo-500/10 shadow-[0_0_20px_rgba(99,102,241,0.3)]'
+                                    : theme === 'dark'
+                                       ? 'border-slate-800 bg-slate-950 hover:border-indigo-500/50'
+                                       : 'border-slate-300 bg-slate-100 hover:border-indigo-500/50'
+                                    }`}
+                              >
+                                 {scanMode === 'deep' && (
+                                    <div className="absolute top-4 right-4">
+                                       <CheckCircle className="w-6 h-6 text-indigo-500" />
+                                    </div>
+                                 )}
+                                 <div className={`flex items-center gap-2 mb-3 ${scanMode === 'deep' ? 'text-indigo-400' : theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'
+                                    }`}>
+                                    <Search className="w-7 h-7" />
+                                    <h3 className="font-semibold text-base">Scan Profond</h3>
+                                 </div>
+                                 <p className={`text-sm mb-3 leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
+                                    }`}>
+                                    Analyse approfondie du code, fichier par fichier
+                                 </p>
+                                 <div className={`text-sm font-medium ${scanMode === 'deep' ? 'text-indigo-400' : theme === 'dark' ? 'text-slate-500' : 'text-slate-500'
+                                    }`}>
+                                    ⏱ Long • 🔍 Précis
+                                 </div>
                               </button>
-                              <button onClick={() => setScanMode('devsecops')} className={`flex-1 p-2 rounded-lg border transition-all flex justify-center items-center ${scanMode === 'devsecops' ? 'bg-orange-500/10 border-orange-500 text-orange-400' : theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-300 text-slate-600'}`} title="DevSecOps">
-                                 <Server className="w-5 h-5" />
+
+                              {/* 🔐 DevSecOps */}
+                              <button
+                                 onClick={() => setScanMode('devsecops')}
+                                 className={`relative p-6 rounded-xl border-2 transition-all text-left ${scanMode === 'devsecops'
+                                    ? 'border-orange-500 bg-orange-500/10 shadow-[0_0_20px_rgba(249,115,22,0.3)]'
+                                    : theme === 'dark'
+                                       ? 'border-slate-800 bg-slate-950 hover:border-orange-500/50'
+                                       : 'border-slate-300 bg-slate-100 hover:border-orange-500/50'
+                                    }`}
+                              >
+                                 {scanMode === 'devsecops' && (
+                                    <div className="absolute top-4 right-4">
+                                       <CheckCircle className="w-6 h-6 text-orange-500" />
+                                    </div>
+                                 )}
+                                 <div className={`flex items-center gap-2 mb-3 ${scanMode === 'devsecops' ? 'text-orange-400' : theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'
+                                    }`}>
+                                    <Shield className="w-7 h-7" />
+                                    <h3 className="font-semibold text-base">DevSecOps</h3>
+                                 </div>
+                                 <p className={`text-sm mb-3 leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
+                                    }`}>
+                                    Sécurité orientée CI/CD et production
+                                 </p>
+                                 <div className={`text-sm font-medium ${scanMode === 'devsecops' ? 'text-orange-400' : theme === 'dark' ? 'text-slate-500' : 'text-slate-500'
+                                    }`}>
+                                    🚀 Production • 🔐 Conformité
+                                 </div>
                               </button>
                            </div>
                         </div>
@@ -360,6 +441,49 @@ export default function App() {
                   {status.progress > 0 && (
                      <div className={`absolute bottom-0 left-0 w-full h-1 ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
                         <div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300" style={{ width: `${status.progress}%` }}></div>
+                     </div>
+                  )}
+
+                  {/* Scan Progress Feedback */}
+                  {status.is_scanning && (
+                     <div className={`mt-4 p-4 rounded-xl border-2 ${scanMode === 'rapid'
+                        ? 'border-emerald-500/50 bg-emerald-500/5'
+                        : scanMode === 'devsecops'
+                           ? 'border-orange-500/50 bg-orange-500/5'
+                           : 'border-indigo-500/50 bg-indigo-500/5'
+                        }`}>
+                        <div className="flex items-start gap-3">
+                           <div className="pt-0.5">
+                              <Activity className={`w-5 h-5 animate-spin ${scanMode === 'rapid' ? 'text-emerald-400' : scanMode === 'devsecops' ? 'text-orange-400' : 'text-indigo-400'
+                                 }`} />
+                           </div>
+                           <div className="flex-1">
+                              {scanMode === 'rapid' && (
+                                 <>
+                                    <h4 className="font-semibold text-sm text-emerald-400 mb-1">⚡ Scan rapide en cours</h4>
+                                    <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
+                                       Analyse des vulnérabilités courantes – terminé dans ~2 min
+                                    </p>
+                                 </>
+                              )}
+                              {scanMode === 'deep' && (
+                                 <>
+                                    <h4 className="font-semibold text-sm text-indigo-400 mb-1">🧠 Scan profond en cours</h4>
+                                    <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
+                                       Analyse complète fichier par fichier – cela peut prendre plusieurs minutes
+                                    </p>
+                                 </>
+                              )}
+                              {scanMode === 'devsecops' && (
+                                 <>
+                                    <h4 className="font-semibold text-sm text-orange-400 mb-1">🔐 Scan DevSecOps en cours</h4>
+                                    <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
+                                       Analyse de sécurité et conformité CI/CD
+                                    </p>
+                                 </>
+                              )}
+                           </div>
+                        </div>
                      </div>
                   )}
                </div>

@@ -19,10 +19,124 @@ from pydantic import BaseModel, Field
 from git import Repo
 
 # ==========================================
-# ⚙️ CONFIGURATION & PROFILS
+# 🧠 OLLAMA AUTO-DETECTION SYSTEM
 # ==========================================
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434/api/generate")
+OLLAMA_TIMEOUT = 2  # seconds for connectivity test
+OLLAMA_RETRIES = 2  # retry attempts per URL
+
+
+def is_running_in_docker() -> bool:
+    """Détecte si le code tourne dans un container Docker."""
+    # Méthode 1 : fichier .dockerenv
+    if os.path.exists("/.dockerenv"):
+        return True
+    
+    # Méthode 2 : cgroup (Linux)
+    try:
+        with open("/proc/1/cgroup", "rt") as f:
+            content = f.read()
+            return "docker" in content or "containerd" in content
+    except Exception:
+        pass
+    
+    # Méthode 3 : Windows - vérifier si on est dans un réseau Docker
+    # (moins fiable mais peut aider)
+    return False
+
+
+def test_ollama(url: str) -> bool:
+    """Test si Ollama est accessible à l'URL donnée."""
+    try:
+        r = requests.post(
+            url,
+            json={
+                "model": "llama3",  # model minimal pour test
+                "prompt": "ping",
+                "stream": False
+            },
+            timeout=OLLAMA_TIMEOUT
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def resolve_ollama_url() -> tuple[str, str]:
+    """
+    Résout automatiquement l'URL Ollama optimale.
+    Retourne: (url, environment_type)
+    """
+    # 1️⃣ Variable d'environnement (priorité absolue)
+    env_url = os.getenv("OLLAMA_URL")
+    if env_url:
+        print(f"[Ollama] 🎯 Using env OLLAMA_URL: {env_url}")
+        return (env_url, "env_override")
+    
+    candidates = []
+    env_type = "unknown"
+    
+    # 2️⃣ Détection Docker
+    in_docker = is_running_in_docker()
+    
+    if in_docker:
+        print("[Ollama] 🐳 Docker environment detected")
+        env_type = "docker"
+        candidates.extend([
+            "http://host.docker.internal:11434/api/generate",  # Docker Desktop
+            "http://ollama:11434/api/generate",  # Docker Compose service
+            "http://172.17.0.1:11434/api/generate",  # Docker bridge network
+        ])
+    else:
+        print("[Ollama] 💻 Native environment detected")
+        env_type = "native"
+        candidates.extend([
+            "http://127.0.0.1:11434/api/generate",
+            "http://localhost:11434/api/generate",
+        ])
+    
+    # 3️⃣ Fallback croisé (au cas où détection Docker échoue)
+    candidates.extend([
+        "http://localhost:11434/api/generate",
+        "http://host.docker.internal:11434/api/generate",
+    ])
+    
+    # 4️⃣ Test de connectivité avec retry
+    print(f"[Ollama] 🔍 Testing {len(candidates)} candidate URLs...")
+    for url in candidates:
+        for attempt in range(OLLAMA_RETRIES):
+            if test_ollama(url):
+                print(f"[Ollama] ✅ Connected → {url}")
+                return (url, env_type)
+            if attempt < OLLAMA_RETRIES - 1:
+                time.sleep(0.3)
+    
+    # 5️⃣ Échec - erreur claire
+    raise RuntimeError(
+        "❌ Impossible de joindre Ollama automatiquement.\n"
+        "➡️ Solutions:\n"
+        "   1. Démarrez Ollama: 'ollama serve'\n"
+        "   2. Ou définissez: OLLAMA_URL=http://your-ollama-url:11434/api/generate"
+    )
+
+
+# Auto-détection au démarrage
+print("\n" + "="*60)
+print("🚀 Nexus Auditor V3.3 Ultimate - Initializing...")
+print("="*60)
+
+try:
+    OLLAMA_URL, ENVIRONMENT_TYPE = resolve_ollama_url()
+    print(f"[Ollama] Environment: {ENVIRONMENT_TYPE}")
+except RuntimeError as e:
+    print(f"\n⚠️  WARNING: {e}\n")
+    # Fallback par défaut (ne fonctionnera probablement pas mais permet au moins de démarrer)
+    OLLAMA_URL = "http://localhost:11434/api/generate"
+    ENVIRONMENT_TYPE = "fallback"
+
+# ==========================================
+# ⚙️ CONFIGURATION & PROFILS
+# ==========================================
 HISTORY_FILE = "audit_history.json"
 RAW_RESPONSES_DIR = "./audit_logs/raw_responses"
 PATCHES_DIR = "./audit_logs/patches"
@@ -63,17 +177,54 @@ SECURITY_FILTERS = {
     "rs": ["XSS"],
 }
 
+# ==========================================
+# 🧠 MODEL EXECUTION PROFILES
+# ==========================================
+# Caractéristiques d'exécution par modèle (indépendant des profils utilisateur)
+# 🔒 Configuration CONSERVATRICE pour stabilité maximale
+
+MODEL_PROFILES = {
+    "deepseek-coder:6.7b": {
+        "max_parallel": 1,  # ⚡ SÉQUENTIEL OBLIGATOIRE (modèle très lent)
+        "timeout_per_file": 240,  # 4 minutes par fichier (conservateur)
+        "latency": "high",
+        "eco_mode": True,
+        "description": "Modèle lourd - stable mais lent. Optimisé pour CPU/GPU faibles."
+    },
+    "qwen2.5-coder:14b": {
+        "max_parallel": 1,  # 🔒 SÉQUENTIEL aussi (RTX 3060 = mono-file pour stabilité)
+        "timeout_per_file": 180,  # 3 minutes par fichier
+        "latency": "medium",
+        "eco_mode": False,
+        "description": "Équilibré - séquentiel pour éviter surcharge GPU moyenne"
+    },
+    "qwen2.5-coder:32b": {
+        "max_parallel": 2,  # 🔒 Parallélisme RÉDUIT (seulement 2 au lieu de 4)
+        "timeout_per_file": 150,  # 2.5 minutes (augmenté)
+        "latency": "low",
+        "eco_mode": False,
+        "description": "Haute performance - nécessite RTX 3090+ pour parallélisme"
+    },
+    # Fallback par défaut pour modèles inconnus
+    "_default": {
+        "max_parallel": 1,  # 🔒 CONSERVATEUR par défaut
+        "timeout_per_file": 180,
+        "latency": "medium",
+        "eco_mode": False,
+        "description": "Configuration standard conservatrice"
+    }
+}
+
 # ⚡ Profils optimisés avec timeout intelligent
 PROFILES = {
     "eco": {
-        "label": "Eco (Rapide - CPU/GPU faible)",
+        "label": "Eco (Optimisé Stabilité)",
         "color": "green",
         "model": "deepseek-coder:6.7b",
         "ctx": 8192,
-        "chunk_size": 4000,  # 🔥 Réduit pour éviter saturation
-        "timeout": 90,  # 🔥 Timeout réduit
-        "parallel_files": 2,  # 🔥 Limité à 2 fichiers
+        "chunk_size": 4000,
         "read_full_file": False,
+        # � Note: timeout et parallel_files définis dans MODEL_PROFILES
         "prompt_template": """
         ROLE: Security Auditor. TARGET: Find CRITICAL vulnerabilities only (OWASP Top 10).
         FORMAT: JSON Only. No markdown.
@@ -87,9 +238,8 @@ PROFILES = {
         "model": "qwen2.5-coder:14b",
         "ctx": 16384,
         "chunk_size": 12000,
-        "timeout": 180,
-        "parallel_files": 4,
         "read_full_file": False,
+        # 📝 Note: timeout et parallel_files définis dans MODEL_PROFILES
         "prompt_template": """
         Role: Senior SAST Auditor with AI Profiling.
         Task: Analyze code for SECURITY VULNERABILITIES (OWASP A1-A10).
@@ -105,9 +255,8 @@ PROFILES = {
         "model": "qwen2.5-coder:32b",
         "ctx": 32768,
         "chunk_size": 24000,
-        "timeout": 300,
-        "parallel_files": 6,
         "read_full_file": False,
+        # 📝 Note: timeout et parallel_files définis dans MODEL_PROFILES
         "prompt_template": """
         Role: Lead Security Researcher with Deep Profiling.
         Task: Deep semantic analysis for LOGICAL and SECURITY vulnerabilities.
@@ -128,9 +277,8 @@ PROFILES = {
         "model": "qwen2.5-coder:32b",
         "ctx": 131072,
         "chunk_size": 100000,
-        "timeout": 600,
-        "parallel_files": 8,
         "read_full_file": True,
+        # 📝 Note: timeout et parallel_files définis dans MODEL_PROFILES
         "prompt_template": """
         ROLE: Elite AI Security Research Team - Multi-Layer Analysis
         CONTEXT: You have access to the COMPLETE file content. Perform exhaustive analysis.
@@ -201,6 +349,72 @@ PROFILES = {
     }
 }
 
+# ==========================================
+# 🎯 SCAN MODES (Semantic Analysis Depth)
+# ==========================================
+# Modes control WHAT and HOW DEEPLY to analyze, NOT performance
+# Performance is ONLY controlled by PROFILES
+
+SCAN_MODES = {
+    "rapid": {
+        "label": "⚡ Scan Rapide",
+        "description": "Focus on critical, exploitable vulnerabilities only",
+        "file_extensions": ('.py', '.js', '.ts', '.php', '.java', '.go'),
+        "severity_focus": ["Critical", "High"],
+        "max_vulns_per_file": 3,
+        "analysis_depth": "surface",
+        "prompt_modifier": """
+
+🎯 RAPID SCAN MODE - CRITICAL ONLY:
+- Report ONLY Critical or High severity vulnerabilities
+- Ignore theoretical or edge-case issues
+- Focus on obvious, immediately exploitable patterns
+- No speculation - confirmed vulnerabilities only
+- MAX 3 findings per file (most critical)
+"""
+    },
+    "deep": {
+        "label": "🧠 Scan Profond",
+        "description": "Balanced analysis with detailed reasoning",
+        "file_extensions": ('.py', '.js', '.jsx', '.ts', '.tsx', '.php', 
+                          '.java', '.c', '.cpp', '.rs', '.go', '.sql', 
+                          '.yaml', '.xml'),
+        "severity_focus": ["Critical", "High", "Medium"],
+        "max_vulns_per_file": 6,
+        "analysis_depth": "standard",
+        "prompt_modifier": """
+
+🧠 DEEP SCAN MODE - COMPREHENSIVE:
+- Report Critical, High, and Medium severity vulnerabilities
+- Include detailed attack vectors and exploitation paths
+- Explain the reasoning behind each finding
+- Medium severity if genuinely exploitable
+- MAX 6 findings per file
+"""
+    },
+    "devsecops": {
+        "label": "🔐 Scan DevSecOps",
+        "description": "Exhaustive production-grade security audit",
+        "file_extensions": ('.yaml', '.yml', '.json', '.env', '.toml', 
+                          'Dockerfile', 'docker-compose.yml',
+                          '.py', '.js', '.ts', '.go', '.java', '.php'),
+        "severity_focus": ["Critical", "High", "Medium", "Low"],
+        "max_vulns_per_file": 12,
+        "analysis_depth": "exhaustive",
+        "prompt_modifier": """
+
+🔐 DEVSECOPS MODE - EXHAUSTIVE:
+- Report ALL severity levels (Critical, High, Medium, Low)
+- Include infrastructure, configuration, and secrets issues
+- Map findings to CWE / OWASP / MITRE ATT&CK when applicable
+- Identify exploit chains and privilege escalation paths
+- Check for CI/CD security misconfigurations
+- Production readiness assessment
+- NO strict limit if critical issues found
+"""
+    }
+}
+
 app = FastAPI(title="Nexus Auditor Enterprise API V2.4 - GPU Intelligent")
 
 app.add_middleware(
@@ -231,7 +445,9 @@ scan_state = {
     "successful_analyses": 0,
     "target_dir": None,
     "parallel_active": 0,
-    "gpu_queue": 0  # 🔥 NOUVEAUTÉ : Files d'attente GPU
+    "gpu_queue": 0,  # 🔥 NOUVEAUTÉ : Files d'attente GPU
+    "ollama_url": OLLAMA_URL,  # 🧠 Auto-détecté
+    "environment": ENVIRONMENT_TYPE  # docker / native / env_override
 }
 
 class ScanRequest(BaseModel):
@@ -422,17 +638,50 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
 # ==========================================
 
 def generate_fix_patch(vuln: dict) -> Optional[dict]:
+    """Génère un patch de correctif pour une vulnérabilité."""
     try:
+        # Essayer d'obtenir le filepath depuis la vulnérabilité
         filepath = vuln.get("filepath")
+        filename = vuln.get("file", "unknown")
+        
+        # Si pas de filepath ou fichier inexistant, chercher dans target_dir
+        if not filepath or not os.path.exists(filepath):
+            add_log(f"⚠️ Filepath manquant ou invalide pour {filename}, recherche...", "warning")
+            
+            target_dir = scan_state.get("target_dir")
+            if target_dir and os.path.exists(target_dir):
+                # Chercher le fichier dans l'arborescence
+                for root, dirs, files in os.walk(target_dir):
+                    if filename in files:
+                        filepath = os.path.join(root, filename)
+                        add_log(f"✅ Fichier trouvé: {filepath}", "info")
+                        break
+        
+        # Vérification finale
+        if not filepath:
+            error_msg = f"Impossible de localiser le fichier: {filename}"
+            add_log(f"❌ {error_msg}", "error")
+            return {
+                "success": False,
+                "error": "Fichier introuvable - le contexte du scan n'est plus disponible. Relancez l'audit pour corriger cette faille."
+            }
+        
+        if not os.path.exists(filepath):
+            error_msg = f"Le fichier n'existe plus: {filepath}"
+            add_log(f"❌ {error_msg}", "error")
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        
+        # Récupérer les infos de correctif
         line = vuln.get("line")
         fix_code = vuln.get("fix", "")
         
-        if not filepath or not os.path.exists(filepath):
-            return {"success": False, "error": "Fichier introuvable"}
-        
         if not line or not fix_code:
-            return {"success": False, "error": "Informations insuffisantes"}
+            return {"success": False, "error": "Informations de correctif insuffisantes"}
         
+        # Lire le fichier original
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             original_lines = f.readlines()
         
@@ -440,8 +689,9 @@ def generate_fix_patch(vuln: dict) -> Optional[dict]:
         vuln_line_idx = line - 1
         
         if vuln_line_idx < 0 or vuln_line_idx >= len(original_lines):
-            return {"success": False, "error": "Numéro de ligne invalide"}
+            return {"success": False, "error": f"Numéro de ligne invalide: {line}"}
         
+        # Préparer le correctif avec indentation
         fix_lines = fix_code.strip().split('\n')
         indent = len(original_lines[vuln_line_idx]) - len(original_lines[vuln_line_idx].lstrip())
         indent_str = ' ' * indent
@@ -449,6 +699,7 @@ def generate_fix_patch(vuln: dict) -> Optional[dict]:
         fixed_lines = [indent_str + line.lstrip() + '\n' if not line.endswith('\n') else indent_str + line.lstrip() for line in fix_lines]
         modified_lines[vuln_line_idx:vuln_line_idx+1] = fixed_lines
         
+        # Générer le diff
         diff = difflib.unified_diff(
             original_lines,
             modified_lines,
@@ -459,12 +710,15 @@ def generate_fix_patch(vuln: dict) -> Optional[dict]:
         
         diff_text = '\n'.join(diff)
         
+        # Sauvegarder le patch
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         patch_filename = f"patch_{vuln['id']}_{timestamp}.patch"
         patch_path = os.path.join(PATCHES_DIR, patch_filename)
         
         with open(patch_path, 'w', encoding='utf-8') as f:
             f.write(diff_text)
+        
+        add_log(f"✅ Patch sauvegardé: {patch_filename}", "success")
         
         return {
             "success": True,
@@ -485,21 +739,22 @@ def generate_fix_patch(vuln: dict) -> Optional[dict]:
 # ==========================================
 
 class IntelligentGPUEngine:
-    def __init__(self, config):
+    def __init__(self, config, scan_mode="deep"):
         self.config = config
+        self.scan_mode = SCAN_MODES.get(scan_mode, SCAN_MODES["deep"])
         self.fallback_model = "deepseek-coder:6.7b"
 
     def call_ollama_with_retry(self, prompt: str, filename: str, max_retries=3) -> Optional[dict]:
         """🔥 NOUVEAUTÉ : Timeout intelligent + Semaphore GPU"""
         
-        # 🔥 Timeout proportionnel à la taille du prompt
-        base_timeout = self.config.get("timeout", TIMEOUT_DEFAULT)
-        intelligent_timeout = max(
-            base_timeout,
-            int(len(prompt) / 1000 * 2)  # 2 secondes par 1000 caractères
-        )
-        
+        # 🧠 Récupération timeout depuis MODEL_PROFILES (adapté au modèle)
         model = self.config["model"]
+        model_profile = MODEL_PROFILES.get(model, MODEL_PROFILES["_default"])
+        base_timeout = model_profile["timeout_per_file"]
+        
+        # 🔥 Timeout adaptatif : +10s par 10k caractères
+        content_adjustment = int(len(prompt) / 10000) * 10
+        intelligent_timeout = base_timeout + content_adjustment
         
         for attempt in range(max_retries):
             try:
@@ -584,7 +839,11 @@ class IntelligentGPUEngine:
             # Mode Titan : lire fichier entier si < chunk_size
             if self.config.get("read_full_file", False) and len(content) < self.config["chunk_size"]:
                 add_log(f"📄 [{filename}] Mode fichier entier ({len(content)} chars)", "info")
-                prompt = self.config["prompt_template"].format(filename=filename, content=content)
+                # Inject semantic scan mode modifier
+                base_prompt = self.config["prompt_template"]
+                mode_modifier = self.scan_mode["prompt_modifier"]
+                combined_prompt = f"{base_prompt}\n{mode_modifier}"
+                prompt = combined_prompt.format(filename=filename, content=content)
                 result = self.call_ollama_with_retry(prompt, filename)
                 
                 if result:
@@ -608,7 +867,11 @@ class IntelligentGPUEngine:
                     break
                 
                 scan_state["current_file"] = f"{filename} ({i+1}/{len(chunks)})"
-                prompt = self.config["prompt_template"].format(filename=filename, content=chunk)
+                # Inject semantic scan mode modifier
+                base_prompt = self.config["prompt_template"]
+                mode_modifier = self.scan_mode["prompt_modifier"]
+                combined_prompt = f"{base_prompt}\n{mode_modifier}"
+                prompt = combined_prompt.format(filename=filename, content=chunk)
                 result = self.call_ollama_with_retry(prompt, filename)
                 
                 if result:
@@ -626,7 +889,7 @@ class IntelligentGPUEngine:
             return []
 
     def _process_result(self, result, filepath, filename):
-        """Traite le résultat JSON de l'IA"""
+        """Traite le résultat JSON de l'IA + filtres sémantiques du mode de scan"""
         data = result["data"]
         raw_response = result["raw"]
         
@@ -638,11 +901,24 @@ class IntelligentGPUEngine:
             for v in data:
                 normalized = normalize_vulnerability(v, filepath, filename, raw_response)
                 
+                # Filtre par sévérité selon le mode de scan
+                if normalized["severity"] not in self.scan_mode["severity_focus"]:
+                    add_log(f"🗑️ [{filename}] {normalized['severity']} filtered (mode: {self.scan_mode['label']})", "info")
+                    continue
+                
                 if normalized["confidence"] < 20:
-                    add_log(f"🗑️ [{filename}] Vulnérabilité ignorée (confiance {normalized['confidence']}%)", "warning")
+                    add_log(f"🗑️ [{filename}] Low confidence ({normalized['confidence']}%)", "warning")
                     continue
                 
                 vulns.append(normalized)
+        
+        # Limiter le nombre de findings selon le mode (tri par confiance)
+        max_vulns = self.scan_mode["max_vulns_per_file"]
+        if len(vulns) > max_vulns:
+            vulns = sorted(vulns, key=lambda v: v["confidence"], reverse=True)
+            original_count = len(vulns)
+            vulns = vulns[:max_vulns]
+            add_log(f"📊 [{filename}] Limited to top {max_vulns}/{original_count} findings (mode: {self.scan_mode['label']})", "info")
         
         return vulns
 
@@ -677,7 +953,18 @@ def run_enterprise_scan_parallel(target: str, profile_key: str, mode: str):
     add_log(f"🚀 Mode: {mode.upper()} | Profil: {profile_key.upper()}")
 
     profile = PROFILES.get(profile_key, PROFILES["balanced"])
-    max_parallel = profile.get("parallel_files", 4)
+    
+    # 🧠 Récupération des paramètres d'exécution depuis MODEL_PROFILES
+    model = profile["model"]
+    model_profile = MODEL_PROFILES.get(model, MODEL_PROFILES["_default"])
+    
+    max_parallel = model_profile["max_parallel"]
+    base_timeout = model_profile["timeout_per_file"]
+    is_eco = model_profile.get("eco_mode", False)
+    
+    # Mise à jour scan_state avec info d'exécution
+    scan_state["execution_strategy"] = "sequential" if max_parallel == 1 else "parallel"
+    scan_state["model_latency"] = model_profile["latency"]
     
     # 🔥 NOUVEAU : Initialiser le semaphore GPU selon le profil
     gpu_limit = GPU_LIMITS.get(profile_key, 2)
@@ -685,8 +972,15 @@ def run_enterprise_scan_parallel(target: str, profile_key: str, mode: str):
     add_log(f"🎯 Limite GPU: {gpu_limit} appels IA simultanés max", "info")
     
     add_log(f"🤖 Modèle : {profile['model']}", "info")
-    add_log(f"⚡ Parallélisation fichiers : {max_parallel}", "info")
     add_log(f"📊 Contexte : {profile['ctx']} tokens", "info")
+    
+    # 🎨 Messages UX professionnels selon stratégie
+    if is_eco:
+        add_log("🟢 Mode Éco activé", "success")
+        add_log("   ↳ Analyse séquentielle optimisée", "info")
+        add_log("   ↳ Stabilité maximale - vitesse réduite", "info")
+    else:
+        add_log(f"⚡ Parallélisation: {max_parallel} fichiers simultanés", "info")
 
     tmp_dir = None
     target_dir = target
@@ -703,12 +997,11 @@ def run_enterprise_scan_parallel(target: str, profile_key: str, mode: str):
         files = []
         extensions = []
         
-        if mode == "rapid":
-            extensions = ('.py', '.js', '.ts', '.php', '.java', '.go')
-        elif mode == "devsecops":
-            extensions = ('.yaml', '.yml', '.json', 'Dockerfile', '.env', '.py', '.js')
-        else:
-            extensions = ('.py', '.js', '.jsx', '.ts', '.tsx', '.php', '.java', '.c', '.cpp', '.rs', '.go', '.sql', '.yaml', '.xml')
+        # 🎯 Récupération de la configuration du mode de scan (sémantique)
+        scan_mode_config = SCAN_MODES.get(mode, SCAN_MODES["deep"])
+        extensions = scan_mode_config["file_extensions"]
+        add_log(f"🎯 Mode: {scan_mode_config['label']} - {scan_mode_config['description']}", "info")
+        add_log(f"📁 Extensions: {len(extensions)} types de fichiers", "info")
 
         exclude = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv'}
         
@@ -731,7 +1024,7 @@ def run_enterprise_scan_parallel(target: str, profile_key: str, mode: str):
             max_parallel = 5
             add_log(f"🎯 Nouveau parallélisme: {max_parallel} fichiers", "info")
 
-        engine = IntelligentGPUEngine(profile)
+        engine = IntelligentGPUEngine(profile, scan_mode=mode)
         start_ts = time.time()
         
         add_log(f"🔥 Lancement analyse parallèle de {total_files} fichiers...", "info")
@@ -851,13 +1144,16 @@ async def generate_fix(request: FixRequest):
     if not vuln:
         raise HTTPException(status_code=404, detail="Vulnérabilité non trouvée")
     
-    add_log(f"🔧 Génération patch #{vuln_id}...", "info")
+    filename = vuln.get("file", "unknown")
+    add_log(f"🔧 Génération patch #{vuln_id} pour {filename}...", "info")
+    
     result = generate_fix_patch(vuln)
     
     if result["success"]:
-        add_log(f"✅ Patch généré : {result['patch_file']}", "success")
+        add_log(f"✅ Patch généré avec succès : {result['patch_file']}", "success")
     else:
-        add_log(f"❌ Échec : {result['error']}", "error")
+        error_msg = result.get("error", "Erreur inconnue")
+        add_log(f"❌ Échec patch #{vuln_id} : {error_msg}", "error")
     
     return result
 

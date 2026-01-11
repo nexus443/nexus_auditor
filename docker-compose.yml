@@ -15,7 +15,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # On lie ces dossiers pour voir les résultats sur Windows
+      # V3.0 FIX: Monter le code source pour mise à jour immédiate
+      - ./backend:/app
       - ./audit_logs:/app/audit_logs
       - ./audit_history.json:/app/audit_history.json
     restart: unless-stopped

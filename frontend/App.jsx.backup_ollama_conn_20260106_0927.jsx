@@ -26,7 +26,6 @@ export default function App() {
    const [target, setTarget] = useState("");
    const [profile, setProfile] = useState("balanced");
    const [scanMode, setScanMode] = useState("deep");
-   const [showLogs, setShowLogs] = useState(false); // V3.1: Log permanence
    const [status, setStatus] = useState({
       is_scanning: false,
       progress: 0,
@@ -53,12 +52,6 @@ export default function App() {
    const [history, setHistory] = useState([]);
    const [autoFixLoading, setAutoFixLoading] = useState(null);
    const logEndRef = useRef(null);
-
-   // Ollama Connection States (V2.5)
-   const [ollamaMode, setOllamaMode] = useState(() => localStorage.getItem('ollamaMode') || 'auto');
-   const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || '');
-   const [ollamaTesting, setOllamaTesting] = useState(false);
-   const [ollamaTestResult, setOllamaTestResult] = useState(null);
 
    useEffect(() => {
       localStorage.setItem('theme', theme);
@@ -90,15 +83,6 @@ export default function App() {
       loadHistory();
    }, []);
 
-   // Persist Ollama config
-   useEffect(() => {
-      localStorage.setItem('ollamaMode', ollamaMode);
-   }, [ollamaMode]);
-
-   useEffect(() => {
-      localStorage.setItem('ollamaUrl', ollamaUrl);
-   }, [ollamaUrl]);
-
    const loadHistory = async () => {
       try {
          const res = await fetch(`${API_URL}/history`);
@@ -107,56 +91,15 @@ export default function App() {
       } catch (e) { console.error(e); }
    };
 
-   const testOllamaConnection = async () => {
-      if (!ollamaUrl.trim()) {
-         setOllamaTestResult({ ok: false, message: "Veuillez entrer une URL" });
-         return;
-      }
-
-      setOllamaTesting(true);
-      setOllamaTestResult(null);
-
-      try {
-         const res = await fetch(`${API_URL}/ollama/test`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: ollamaUrl })
-         });
-         const data = await res.json();
-         setOllamaTestResult(data);
-      } catch (e) {
-         setOllamaTestResult({ ok: false, message: "Backend hors ligne" });
-      } finally {
-         setOllamaTesting(false);
-      }
-   };
-
    const scrollToBottom = () => logEndRef.current?.scrollIntoView({ behavior: "smooth" });
 
    const startScan = async () => {
-      console.log("🚀 FRONTEND startScan appelé");
-      console.log("  target state =", target);
-      console.log("  scanMode =", scanMode);
-      console.log("  profile =", profile);
-
       if (!target) return alert("Veuillez entrer une cible !");
-
-      // V2.5: Validation Ollama remote
-      if (ollamaMode === 'remote' && !ollamaUrl.trim()) {
-         return alert("Mode serveur distant sélectionné : veuillez renseigner l'URL Ollama.");
-      }
-
       try {
          await fetch(`${API_URL}/scan/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-               target,
-               profile,
-               mode: scanMode,
-               ollama_mode: ollamaMode,
-               ollama_url: ollamaMode === 'remote' ? ollamaUrl : null
-            })
+            body: JSON.stringify({ target, profile, mode: scanMode })
          });
          setStatus(prev => ({ ...prev, is_scanning: true, progress: 1 }));
          setView('running'); // Switch to running view
@@ -339,7 +282,7 @@ export default function App() {
                   </div>
                   <div>
                      <h1 className="text-xl font-bold tracking-tight leading-none">Nexus <span className="text-indigo-400">Auditor</span></h1>
-                     <span className={`text-xs font-medium tracking-wider ${theme === 'dark' ? 'text-slate-500' : 'text-slate-400'}`}>ENTERPRISE EDITION V3.0</span>
+                     <span className={`text-xs font-medium tracking-wider ${theme === 'dark' ? 'text-slate-500' : 'text-slate-400'}`}>ENTERPRISE EDITION V2.5</span>
                   </div>
                </div>
 
@@ -476,84 +419,6 @@ export default function App() {
                            </div>
                         </div>
 
-
-                        {/* OLLAMA CONNECTION (V2.5) */}
-                        <div className="mt-6">
-                           <label className={`block text-xs font-semibold uppercase tracking-wider mb-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
-                              }`}>Connexion Ollama</label>
-
-                           <div className="flex gap-2 mb-3">
-                              <button
-                                 onClick={() => { setOllamaMode('auto'); setOllamaTestResult(null); }}
-                                 className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-all ${ollamaMode === 'auto'
-                                    ? 'bg-indigo-600/10 border-indigo-500 text-indigo-400'
-                                    : theme === 'dark'
-                                       ? 'bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600'
-                                       : 'bg-slate-100 border-slate-300 text-slate-600 hover:border-slate-400'
-                                    }`}
-                              >
-                                 🔄 Auto (recommandé)
-                              </button>
-                              <button
-                                 onClick={() => { setOllamaMode('remote'); setOllamaTestResult(null); }}
-                                 className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-all ${ollamaMode === 'remote'
-                                    ? 'bg-indigo-600/10 border-indigo-500 text-indigo-400'
-                                    : theme === 'dark'
-                                       ? 'bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600'
-                                       : 'bg-slate-100 border-slate-300 text-slate-600 hover:border-slate-400'
-                                    }`}
-                              >
-                                 🌐 Serveur distant
-                              </button>
-                           </div>
-
-                           {ollamaMode === 'remote' && (
-                              <div className="space-y-2">
-                                 <input
-                                    type="text"
-                                    value={ollamaUrl}
-                                    onChange={(e) => { setOllamaUrl(e.target.value); setOllamaTestResult(null); }}
-                                    placeholder="192.168.1.50:11434 ou http://..."
-                                    className={`w-full border rounded-lg py-2 px-3 focus:outline-none focus:ring-1 transition-all font-mono text-sm ${theme === 'dark'
-                                       ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500 focus:ring-indigo-500'
-                                       : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400 focus:ring-indigo-400'
-                                       }`}
-                                 />
-                                 <button
-                                    onClick={testOllamaConnection}
-                                    disabled={ollamaTesting || !ollamaUrl.trim()}
-                                    className={`w-full py-2 px-3 rounded-lg text-sm font-medium border transition-all ${theme === 'dark'
-                                       ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
-                                       : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-700'
-                                       } disabled:opacity-50 disabled:cursor-not-allowed`}
-                                 >
-                                    {ollamaTesting ? '⏳ Test en cours...' : '🔍 Tester la connexion'}
-                                 </button>
-
-                                 {ollamaTestResult && (
-                                    <div className={`p-3 rounded-lg border text-sm ${ollamaTestResult.ok
-                                       ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                                       : 'bg-red-500/10 border-red-500/20 text-red-400'
-                                       }`}>
-                                       <div className="font-semibold mb-1">{ollamaTestResult.ok ? '✅ ' : '❌ '}{ollamaTestResult.message}</div>
-                                       {ollamaTestResult.models && ollamaTestResult.models.length > 0 && (
-                                          <div className={`text-xs mt-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
-                                             Modèles: {ollamaTestResult.models.slice(0, 5).join(', ')}
-                                             {ollamaTestResult.models.length > 5 && ` (+${ollamaTestResult.models.length - 5} autres)`}
-                                          </div>
-                                       )}
-                                    </div>
-                                 )}
-                              </div>
-                           )}
-
-                           {ollamaMode === 'auto' && (
-                              <div className={`text-xs p-2 rounded ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
-                                 Détection automatique (localhost:11434 ou Docker)
-                              </div>
-                           )}
-                        </div>
-
                         <div className={`pt-4 flex items-center justify-between border-t ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'
                            }`}>
                            <div className={`flex items-center gap-4 text-sm font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'
@@ -685,15 +550,6 @@ export default function App() {
                      </div>
                      <div className="flex gap-3">
                         <button
-                           onClick={() => setShowLogs(true)}
-                           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm border transition-colors ${theme === 'dark'
-                              ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
-                              : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700'
-                              }`}
-                        >
-                           <Terminal size={16} /> Logs
-                        </button>
-                        <button
                            onClick={() => {
                               setView('config');
                               setSelectedVulnId(null);
@@ -712,13 +568,11 @@ export default function App() {
                      <div className={`flex flex-col items-center justify-center h-full border border-dashed rounded-xl ${theme === 'dark' ? 'border-slate-800' : 'border-slate-300'}`}>
                         <CheckCircle className={`w-16 h-16 mb-4 ${theme === 'dark' ? 'text-slate-700' : 'text-slate-300'}`} />
                         <p className={`text-lg font-semibold mb-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
-                           ✅ Aucune vulnérabilité critique détectée selon le niveau d'analyse sélectionné
+                           Aucune vulnérabilité confirmée selon les règles du mode sélectionné
                         </p>
-                        {(scanMode === 'rapid' || scanMode === 'deep') && (
-                           <p className={`text-sm ${theme === 'dark' ? 'text-slate-600' : 'text-slate-500'}`}>
-                              💡 Essayez le mode <strong>DevSecOps</strong> pour une analyse exhaustive (toutes sévérités, tous fichiers)
-                           </p>
-                        )}
+                        <p className={`text-sm ${theme === 'dark' ? 'text-slate-600' : 'text-slate-500'}`}>
+                           Essayez un mode plus profond (Deep ou DevSecOps) pour une analyse étendue.
+                        </p>
                      </div>
                   ) : (
                      <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
@@ -900,56 +754,6 @@ export default function App() {
                         </div>
                      </div>
                   )}
-               </div>
-            )}
-
-            {/* === LOGS MODAL (V3.1) === */}
-            {showLogs && (
-               <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-                  <div className="w-full max-w-5xl h-[700px] flex flex-col rounded-2xl shadow-2xl overflow-hidden bg-slate-950 border border-slate-800">
-
-                     <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50 text-slate-200">
-                        <div className="flex items-center gap-3">
-                           <div className="p-2 bg-indigo-500/10 rounded-lg">
-                              <Terminal size={18} className="text-indigo-400" />
-                           </div>
-                           <div>
-                              <h3 className="font-bold text-sm">Logs d'exécution</h3>
-                              <p className="text-xs text-slate-500 font-mono">{status.logs.length} entrées • {status.estimated_time}</p>
-                           </div>
-                        </div>
-                        <button
-                           onClick={() => setShowLogs(false)}
-                           className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
-                        >
-                           <XCircle size={20} />
-                        </button>
-                     </div>
-
-                     <div className="flex-1 bg-slate-950 p-6 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar selection:bg-indigo-500/30">
-                        {status.logs.map((log, i) => {
-                           // Style intelligent selon le contenu du log (V3.1 Explainable)
-                           const isFiltered = log.msg.includes('🗑️ Filtered');
-                           const isPrudent = log.msg.includes('⚠️ Prudent');
-                           const isCritical = log.msg.includes('🚨');
-
-                           let txColor = 'text-slate-300';
-                           if (log.type === 'success') txColor = 'text-emerald-400';
-                           else if (log.type === 'error' || isCritical) txColor = 'text-red-400 font-bold';
-                           else if (log.type === 'warning' || isPrudent) txColor = 'text-yellow-400';
-                           else if (isFiltered) txColor = 'text-slate-500 italic'; // Grisé pour les filtres
-
-                           return (
-                              <div key={i} className={`flex gap-4 p-1 rounded hover:bg-white/5 transition-colors ${isFiltered ? 'opacity-60 hover:opacity-100' : ''}`}>
-                                 <span className="text-slate-600 shrink-0 select-none w-16 text-right">[{log.time}]</span>
-                                 <span className={`${txColor} break-all`}>
-                                    {log.msg}
-                                 </span>
-                              </div>
-                           );
-                        })}
-                     </div>
-                  </div>
                </div>
             )}
          </main>

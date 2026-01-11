@@ -1,5 +1,651 @@
 [
   {
+    "id": "5e253e64",
+    "date": "2026-01-08T14:49:51.347871",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 12,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "967605cb",
+    "date": "2026-01-08T14:44:30.999913",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 13,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 81.38,
+    "duration_seconds": 476,
+    "successful_analyses": 95,
+    "failed_analyses": 5
+  },
+  {
+    "id": "dbc71e30",
+    "date": "2026-01-08T14:31:22.332093",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 459,
+    "successful_analyses": 0,
+    "failed_analyses": 100
+  },
+  {
+    "id": "376fe6e2",
+    "date": "2026-01-08T14:18:42.378420",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 100
+  },
+  {
+    "id": "ff90ea26",
+    "date": "2026-01-08T14:13:24.840812",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 100
+  },
+  {
+    "id": "af10f4ba",
+    "date": "2026-01-08T14:06:11.007810",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 100
+  },
+  {
+    "id": "ef6f1fab",
+    "date": "2026-01-08T14:00:55.648047",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 798,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 798
+  },
+  {
+    "id": "f8db1d27",
+    "date": "2026-01-08T14:00:22.169369",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 100
+  },
+  {
+    "id": "53dc4749",
+    "date": "2026-01-08T13:59:52.548875",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 30,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 30
+  },
+  {
+    "id": "ecf68c58",
+    "date": "2026-01-08T13:57:14.674116",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 10
+  },
+  {
+    "id": "f20fe1e8",
+    "date": "2026-01-08T13:57:02.827639",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 3
+  },
+  {
+    "id": "817b6dcc",
+    "date": "2026-01-08T13:56:51.288335",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 1,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 1
+  },
+  {
+    "id": "d402484d",
+    "date": "2026-01-08T13:17:26.325650",
+    "target": "https://github.com/juice-shop/juice-shop",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 18,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "confidence_score": 95.28,
+    "duration_seconds": 428,
+    "successful_analyses": 100,
+    "failed_analyses": 0
+  },
+  {
+    "id": "0e07be73",
+    "date": "2026-01-08T13:05:41.209401",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 18,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "8b4f0b65",
+    "date": "2026-01-06T14:10:05.433610",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "titan",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 97.5,
+    "duration_seconds": 18,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "e4df5683",
+    "date": "2026-01-06T13:57:17.174254",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "titan",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 2,
+      "high": 28,
+      "medium": 0,
+      "low": 1,
+      "files": 180,
+      "skipped": 0
+    },
+    "confidence_score": 94.44,
+    "duration_seconds": 497,
+    "successful_analyses": 180,
+    "failed_analyses": 0
+  },
+  {
+    "id": "d079327a",
+    "date": "2026-01-06T13:47:50.705257",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "titan",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 97.5,
+    "duration_seconds": 26,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "388f1e4e",
+    "date": "2026-01-06T12:30:22.747073",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 14,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "2890e0ba",
+    "date": "2026-01-06T10:03:54.967136",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 18,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "034de1d3",
+    "date": "2026-01-06T09:18:28.017923",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 7,
+      "high": 31,
+      "medium": 1,
+      "low": 0,
+      "files": 180,
+      "skipped": 0
+    },
+    "confidence_score": 86.47,
+    "duration_seconds": 715,
+    "successful_analyses": 180,
+    "failed_analyses": 0
+  },
+  {
+    "id": "d987a69d",
+    "date": "2026-01-06T09:06:16.856265",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 14,
+    "successful_analyses": 3,
+    "failed_analyses": 0
+  },
+  {
+    "id": "ac0f27af",
+    "date": "2026-01-06T08:57:57.846867",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 34,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "808a2a34",
+    "date": "2026-01-06T08:55:30.520951",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 45,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "de4209e8",
+    "date": "2026-01-05T18:10:22.693265",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 71,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "b79d5bf0",
+    "date": "2026-01-05T17:49:02.405126",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 70,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "b10eedc7",
+    "date": "2026-01-03T00:04:09.597049",
+    "target": "https://github.com/eliboa/TegraRcmGUI.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 10,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 150,
+    "successful_analyses": 23,
+    "failed_analyses": 0
+  },
+  {
+    "id": "ecf2f567",
+    "date": "2025-12-17T22:53:18.739199",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 1,
+      "high": 2,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 97.5,
+    "duration_seconds": 150,
+    "successful_analyses": 22,
+    "failed_analyses": 0
+  },
+  {
+    "id": "ce420990",
+    "date": "2025-12-17T22:41:07.899058",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 3,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 165,
+    "successful_analyses": 22,
+    "failed_analyses": 0
+  },
+  {
+    "id": "e615dbc4",
+    "date": "2025-12-17T22:37:23.507395",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 1,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 74,
+    "successful_analyses": 10,
+    "failed_analyses": 0
+  },
+  {
+    "id": "0a1b0731",
+    "date": "2025-12-17T21:35:00.266801",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 6,
+      "high": 20,
+      "medium": 0,
+      "low": 0,
+      "files": 9,
+      "skipped": 0
+    },
+    "confidence_score": 93.73,
+    "duration_seconds": 326,
+    "successful_analyses": 28,
+    "failed_analyses": 0
+  },
+  {
+    "id": "878c1b89",
+    "date": "2025-12-17T21:26:53.964425",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 5,
+      "high": 4,
+      "medium": 0,
+      "low": 0,
+      "files": 7,
+      "skipped": 0
+    },
+    "confidence_score": 96.61,
+    "duration_seconds": 186,
+    "successful_analyses": 16,
+    "failed_analyses": 0
+  },
+  {
+    "id": "ff455980",
+    "date": "2025-12-17T21:19:01.824093",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 7,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 7
+  },
+  {
+    "id": "7941aa12",
+    "date": "2025-12-17T21:11:39.254917",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 9,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 9
+  },
+  {
+    "id": "67d3524f",
+    "date": "2025-12-17T21:02:11.860029",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 7,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 0,
+    "successful_analyses": 0,
+    "failed_analyses": 7
+  },
+  {
     "id": "95095991",
     "date": "2025-12-17T13:03:05.278992",
     "target": "https://github.com/nexus443/nexus_auditor.git",

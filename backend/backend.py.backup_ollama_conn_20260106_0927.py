@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from git import Repo
 
 # ==========================================
-# ⚙️ NEXUS AUDITOR V3.0 STABLE
+# ⚙️ NEXUS AUDITOR V2.5 STABLE
 # ==========================================
 # Architecture: V2.2 base + améliorations contrôlées
 # Principe: Stabilité > Sophistication
@@ -34,46 +34,10 @@ os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
 os.makedirs(PATCHES_DIR, exist_ok=True)
 
 # ==========================================
-# 🔗 OLLAMA CONNECTION MANAGEMENT
-# ==========================================
-
-def normalize_ollama_url(url: str) -> str:
-    """Normalise une URL Ollama (trim, ajoute http://, enlève / final)"""
-    url = url.strip()
-    if not url:
-        raise ValueError("URL Ollama vide")
-    
-    # Ajouter http:// si absent
-    if not url.startswith(('http://', 'https://')):
-        url = f"http://{url}"
-    
-    # Enlever / final
-    url = url.rstrip('/')
-    
-    return url
-
-def get_ollama_base_url(scan_request: Optional['ScanRequest'] = None, ollama_mode: str = "auto", ollama_url: Optional[str] = None) -> str:
-    """Retourne l'URL de base Ollama selon le mode (auto ou remote)"""
-    # Si scan_request fourni, utiliser ses paramètres
-    if scan_request:
-        ollama_mode = scan_request.ollama_mode
-        ollama_url = scan_request.ollama_url
-    
-    if ollama_mode == "remote":
-        if not ollama_url:
-            raise ValueError("Mode remote sélectionné mais URL Ollama manquante")
-        return normalize_ollama_url(ollama_url)
-    else:
-        # Mode auto: utiliser OLLAMA_BASE_URL existant
-        return OLLAMA_BASE_URL
-
-
-
-# ==========================================
 # 🤖 GESTION AUTOMATIQUE DES MODÈLES
 # ==========================================
 
-def get_installed_models(ollama_base_url: str = None) -> set:
+def get_installed_models() -> set:
     """Récupère la liste des modèles installés dans Ollama"""
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=10)
@@ -85,19 +49,18 @@ def get_installed_models(ollama_base_url: str = None) -> set:
         print(f"[Ollama] ⚠️ Impossible de lister les modèles: {e}")
     return set()
 
-def is_model_installed(model_name: str, ollama_base_url: str = None) -> bool:
+def is_model_installed(model_name: str) -> bool:
     """Vérifie si un modèle spécifique est installé"""
-    installed = get_installed_models(ollama_base_url)
+    installed = get_installed_models()
     # Vérifier nom exact ou sans tag
     return model_name in installed or model_name.split(":")[0] in {m.split(":")[0] for m in installed}
 
-def pull_model(model_name: str, ollama_base_url: str = None) -> bool:
+def pull_model(model_name: str) -> bool:
     """Télécharge un modèle Ollama (peut prendre du temps)"""
-    base_url = ollama_base_url or OLLAMA_BASE_URL
     print(f"[Ollama] 📥 Téléchargement du modèle {model_name}...")
     try:
         response = requests.post(
-            f"{base_url}/api/pull",
+            f"{OLLAMA_BASE_URL}/api/pull",
             json={"name": model_name, "stream": False},
             timeout=3600  # 1 heure max pour les gros modèles
         )
@@ -111,14 +74,14 @@ def pull_model(model_name: str, ollama_base_url: str = None) -> bool:
         print(f"[Ollama] ❌ Erreur: {e}")
         return False
 
-def ensure_model_available(model_name: str, ollama_base_url: str = None) -> bool:
+def ensure_model_available(model_name: str) -> bool:
     """Vérifie et installe le modèle si nécessaire. Retourne True si disponible."""
-    if is_model_installed(model_name, ollama_base_url):
+    if is_model_installed(model_name):
         print(f"[Ollama] ✅ Modèle {model_name} déjà installé")
         return True
     
     print(f"[Ollama] ⚠️ Modèle {model_name} non trouvé, installation en cours...")
-    return pull_model(model_name, ollama_base_url)
+    return pull_model(model_name)
 
 
 
@@ -128,39 +91,36 @@ def ensure_model_available(model_name: str, ollama_base_url: str = None) -> bool
 # Ce prompt est COURT et STRICT - NE PAS ALOURDIR
 # NOTE: Les accolades JSON sont doublées {{}} pour éviter les conflits avec .format()
 
-CORE_PROMPT = """You are a professional security code auditor.
+CORE_PROMPT = """You are a security code auditor.
 
-Your task is to identify REAL, CONFIRMED security vulnerabilities
-based ONLY on the provided source code.
+Your task is to identify REAL and CONFIRMED security vulnerabilities
+based solely on the provided code.
 
 Rules:
-- Do NOT invent vulnerabilities
-- Do NOT speculate
-- Do NOT assume missing context
-- If evidence is insufficient, return no finding
+- Do not invent vulnerabilities.
+- Do not speculate.
+- Do not assume external context.
+- If unsure, return no finding.
 
 For each vulnerability:
-- Provide the exact code snippet
-- Provide line numbers
-- Explain why it is vulnerable
-- Describe a realistic exploitation scenario
+- Provide the exact code snippet as evidence.
+- Explain why it is vulnerable.
+- Describe a realistic exploitation scenario.
 
-Return ONLY valid JSON using this schema:
-[
-  {{
-    "title": "string",
-    "type": "string",
-    "severity": "Critical|High|Medium|Low",
-    "confidence": 0-100,
-    "file": "string",
-    "lines": "start-end",
-    "evidence": "exact code",
-    "impact": "realistic impact",
-    "recommendation": "specific mitigation"
-  }}
-]
+Return ONLY a JSON array with this schema:
+[{{
+  "type": "string",
+  "severity": "Critical|High|Medium|Low",
+  "confidence": 0-100,
+  "line": <line_number>,
+  "title": "short title",
+  "description": "short factual description",
+  "evidence": "exact code snippet",
+  "impact": "realistic impact",
+  "fix": "specific mitigation code"
+}}]
 
-If no confirmed vulnerability exists, return []
+If no confirmed vulnerability exists, return: []
 
 CODE FILE ({filename}):
 ```
@@ -171,41 +131,43 @@ CODE FILE ({filename}):
 # ==========================================
 # ⚡ PROFILS DE PUISSANCE (INFRASTRUCTURE)
 # ==========================================
-# V3.1: Calibrage Strict Hardware
+# Les profils contrôlent CE QUE LA MACHINE PEUT ENCAISSER
+# V2.5: Qwen2.5-Coder 7B en eco (moins d'hallucinations)
+
 POWER_PROFILES = {
     "eco": {
         "label": "🍃 Eco (Mac M1 / CPU)",
-        "description": "Stabilité maximale > Exhaustivité",
-        "model": "qwen2.5-coder:7b",
+        "description": "Stabilité maximale, séquentiel",
+        "model": "qwen2.5-coder:7b",  # V2.5: Changé de deepseek
         "num_ctx": 8192,
-        "num_predict": 1024,
+        "num_predict": 1024,  # V2.5: Réduit pour réponses concises
         "chunk_size": 6000,
-        "timeout": 90,
+        "timeout": 90,  # V2.5: Réduit
         "parallel_files": 1,
     },
     "balanced": {
         "label": "⚖️ Balanced (RTX 3060)",
-        "description": "Précision stable",
+        "description": "Précision stable, séquentiel",
         "model": "qwen2.5-coder:14b",
         "num_ctx": 16384,
-        "num_predict": 2048,
+        "num_predict": 2048,  # V2.5: Réduit
         "chunk_size": 10000,
-        "timeout": 120,
+        "timeout": 120,  # V2.5: Réduit
         "parallel_files": 1,
     },
     "elite": {
         "label": "🚀 Elite (RTX 3090/4090)",
-        "description": "Haute fidélité",
+        "description": "Analyse avancée, parallélisme modéré",
         "model": "qwen2.5-coder:32b",
         "num_ctx": 32768,
         "num_predict": 4096,
         "chunk_size": 15000,
-        "timeout": 180,
+        "timeout": 180,  # V2.5: Réduit
         "parallel_files": 2,
     },
     "titan": {
         "label": "🔥 Titan (RTX 5090 / Enterprise)",
-        "description": "Audit expert entreprise",
+        "description": "Audit exhaustif entreprise",
         "model": "qwen2.5-coder:32b",
         "num_ctx": 65536,
         "num_predict": 8192,
@@ -216,56 +178,46 @@ POWER_PROFILES = {
 }
 
 # ==========================================
-# 🎯 MODES DE SCAN (BUDGET PROFILAGE)
+# 🎯 MODES DE SCAN (BUDGET PRODUIT)
 # ==========================================
-# V3.1: Profondeur d'analyse et Filtrage
+# V2.5: Budgets stricts, seuils confiance ajustés
+
 SCAN_MODES = {
     "rapid": {
-        "label": "Scan Rapide",
-        "description": "Critique uniquement",
-        "max_files": 30,
-        "max_time_per_file": 20,
+        "label": "⚡ Rapide",
+        "description": "Rapide, ciblé, peu de résultats",
+        "max_files": 30,  # V2.5: Réduit de 50 à 30
+        "max_time_per_file": 20,  # V2.5: Réduit
         "max_vulns_per_file": 3,
         "min_severity": "High",
-        "min_severity_order": 3,
-        "min_confidence": 50,  # Strict
-        "num_predict_override": 256,
+        "min_confidence": 85,  # V2.5: Augmenté de 70 à 85
+        "num_predict_override": 256,  # V2.5: Réponses ultra-courtes
         "file_extensions": ('.py', '.js', '.ts', '.php', '.java', '.go'),
-        "enable_prudent_detection": False,
-        "description_long": "Filtrage sévère (Confiance 50%+, Sévérité High+)"
     },
     "deep": {
-        "label": "Scan Profond",
-        "description": "Audit standard entreprise",
-        "max_files": 100,
-        "max_time_per_file": 60,
+        "label": "🧠 Profond",
+        "description": "Équilibré, précis",
+        "max_files": 100,  # V2.5: Réduit de 200 à 100
+        "max_time_per_file": 60,  # V2.5: Réduit
         "max_vulns_per_file": 10,
         "min_severity": "Medium",
-        "min_severity_order": 2,
-        "min_confidence": 35,  # V3.1: Compromis idéal
-        "num_predict_override": None,
+        "min_confidence": 50,
+        "num_predict_override": None,  # Utilise le profil
         "file_extensions": ('.py', '.js', '.jsx', '.ts', '.tsx', '.php', '.java', 
                            '.c', '.cpp', '.rs', '.go', '.sql'),
-        "enable_prudent_detection": True,  # 35-50%
-        "description_long": "Audit équilibré (Confiance 35%+, Sévérité Medium+)"
     },
     "devsecops": {
-        "label": "DevSecOps",
-        "description": "Exhaustivité Maximale",
+        "label": "🔐 DevSecOps",
+        "description": "Exhaustif, long assumé",
         "max_files": None,
-        "max_time_per_file": 120,
-        "max_vulns_per_file": 20,
+        "max_time_per_file": 180,
+        "max_vulns_per_file": None,
         "min_severity": "Low",
-        "min_severity_order": 1,
-        "min_confidence": 30,  # Permissif mais filtré
+        "min_confidence": 30,
         "num_predict_override": None,
         "file_extensions": ('.yaml', '.yml', '.json', '.env', '.toml',
                            '.py', '.js', '.ts', '.go', '.java', '.php',
-                           '.rb', '.cs', '.c', '.cpp', '.h', '.hpp', 
-                           '.rs', '.swift', '.kt', '.scala', '.pl', '.sh', 
-                           '.dockerfile', 'Dockerfile', 'docker-compose.yml', 'Makefile'),
-        "enable_prudent_detection": True,
-        "description_long": "Tout voir (Confiance 30%+, Sévérité Low+)"
+                           'Dockerfile', 'docker-compose.yml'),
     }
 }
 
@@ -334,7 +286,7 @@ SECURITY_FILTERS = {
 # 🚀 FASTAPI APP
 # ==========================================
 
-app = FastAPI(title="Nexus Auditor Enterprise API V3.0 Stable")
+app = FastAPI(title="Nexus Auditor Enterprise API V2.5 Stable")
 
 app.add_middleware(
     CORSMiddleware,
@@ -372,9 +324,6 @@ class ScanRequest(BaseModel):
     target: str
     profile: str = "balanced"
     mode: str = "deep"
-    # Ollama connection method
-    ollama_mode: str = "auto"  # "auto" | "remote"
-    ollama_url: Optional[str] = None
 
 class FixRequest(BaseModel):
     vuln_id: int
@@ -533,9 +482,51 @@ def find_code_lines(file_content: str, evidence: str) -> tuple:
     return (None, None)
 
 # ==========================================
+# 🚨 ECO RULE #5: POLITIQUE DE SÉVÉRITÉ
+# ==========================================
+
+def apply_eco_severity_policy(vuln: dict, evidence: str, file_content: str) -> str:
+    """
+    ECO: Critical est RARE. Downgrade si preuve faible.
+    Conditions pour Critical:
+    - Preuve claire ET
+    - Impact direct ET
+    - Exploit réaliste
+    """
+    severity = vuln.get("severity", "Low")
+    
+    if severity != "Critical":
+        return severity  # Pas de downgrade nécessaire
+    
+    # Vérifier la force de la preuve
+    has_strong_evidence = False
+    
+    # Check 1: Evidence textuelle présente
+    if evidence and file_content and evidence.strip() in file_content:
+        has_strong_evidence = True
+    
+    # Check 2: Confidence très haute (≥ 90)
+    if vuln.get("confidence", 0) >= 90:
+        has_strong_evidence = True
+    
+    # Check 3: Impact et exploit bien documentés
+    impact = vuln.get("impact", "")
+    description = vuln.get("description", "")
+    if len(impact) > 50 and len(description) > 100:
+        # Impact et description détaillés = sérieux
+        has_strong_evidence = True
+    
+    # ECO: Si preuve faible, downgrade Critical → High
+    if not has_strong_evidence:
+        add_log(f"⬇️ ECO Downgrade: Critical → High (preuve faible)", "info")
+        return "High"
+    
+    return "Critical"
+
+
+# ==========================================
 # 🎯 FILTRAGE POST-IA (LOGIQUE AUTOUR DU MOTEUR)
 # ==========================================
-# V3.1: Logique de filtrage unifiée et explicable
 
 def calculate_confidence(vuln: dict, raw_response: str, filepath: str) -> float:
     """Calcule le score de confiance d'une vulnérabilité"""
@@ -578,11 +569,6 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
     C'est ici que la logique produit s'applique, PAS dans le prompt.
     """
     severity_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-    
-    # V3.0 DEBUG: Log avant filtrage
-    add_log(f"🔍 FILTRAGE: {len(vulns)} vulns brutes reçues pour {os.path.basename(filepath)}", "info")
-    if vulns:
-        add_log(f"  Exemple: {vulns[0].get('title', 'N/A')} (sev={vulns[0].get('severity')}, conf={vulns[0].get('confidence')}%)", "info")
     min_sev = severity_order.get(mode_config["min_severity"], 0)
     min_conf = mode_config["min_confidence"]
     
@@ -596,55 +582,26 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
     
     file_ext = os.path.splitext(filepath)[1].lstrip('.').lower()
     
-    # V3.1: FILTRAGE INTELLIGENT & EXPLICABLE
     filtered = []
-    mode_key = mode_config.get("label", "Unknown").lower()
-    
     for v in vulns:
         title = v.get('title', 'N/A')
         vuln_type = v.get('type', '').upper()
-        
-        # 1. Normalisation Sévérité
-        raw_severity = v.get("severity", "Low")
-        normalized_severity = raw_severity.strip().capitalize() if isinstance(raw_severity, str) else "Low"
-        if normalized_severity not in severity_order:
-            normalized_severity = "Low"
-        v["severity"] = normalized_severity
-        
-        vuln_sev_val = severity_order.get(normalized_severity, 1)
+        vuln_sev = severity_order.get(v.get("severity", "Low"), 0)
         vuln_conf = v.get("confidence", 0)
         
-        # 2. Filtre Sévérité
-        if vuln_sev_val < min_sev:
-            # Exception : Ne jamais filtrer SQLi/RCE même si sev estimée basse (sauf Rapid)
-            critical_types = ["SQL", "INJECTION", "RCE", "COMMAND", "XSS", "DESERIAL"]
-            is_critical_type = any(ct in vuln_type for ct in critical_types) or any(ct in title.upper() for ct in critical_types)
-            
-            if is_critical_type and "rapid" not in mode_key:
-                 add_log(f"⚠️ Force Keep: {title} (Type Critique malgré Sévérité {normalized_severity})", "warning")
-            else:
-                add_log(f"🗑️ Filtered: {title} | severity={normalized_severity} | reason=min_severity<{mode_config['min_severity']} ({mode_key})", "info")
-                continue
-
-        # 3. Filtre Confiance & Détection Prudente
-        is_prudent = False
-        if vuln_conf < min_conf:
-            # Check Prudent Detection (Scope 35-50% généralement)
-            if mode_config.get("enable_prudent_detection", False):
-                if 35 <= vuln_conf < 50:
-                    critical_types = ["SQL", "INJECTION", "RCE", "COMMAND", "XSS", "BUFFER", "OVERFLOW", "DESERIAL"]
-                    is_critical_type = any(ct in vuln_type for ct in critical_types) or any(ct in title.upper() for ct in critical_types)
-                    
-                    if is_critical_type:
-                        is_prudent = True
-                        v["prudent_detection"] = True
-                        v["note"] = "Review Required (Low Confidence 35-50%)"
-                        add_log(f"⚠️ Prudent detection: {title} | confidence={vuln_conf} | manual review", "warning")
-            
-            if not is_prudent:
-                add_log(f"🗑️ Filtered: {title} | confidence={vuln_conf} | reason=min_confidence<{min_conf} ({mode_key})", "info")
-                continue
+        # ==========================================
+        # FILTRE 1: Sévérité minimum
+        # ==========================================
+        if vuln_sev < min_sev:
+            add_log(f"🗑️ Filtré (sévérité): {title} ({v.get('severity')})", "info")
+            continue
         
+        # ==========================================
+        # FILTRE 2: Confiance minimum (V2.5: seuils stricts)
+        # ==========================================
+        if vuln_conf < min_conf:
+            add_log(f"🗑️ Filtré (confiance): {title} ({vuln_conf}%)", "info")
+            continue
         
         # ==========================================
         # FILTRE 3: V2.5 - Preuve selon le mode
@@ -658,16 +615,12 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
         if "Rapide" in mode_label or "rapid" in mode_label.lower():
             # 🔒 RAPID: Preuve textuelle stricte obligatoire
             if evidence and file_content:
-                # V3.1: Sécuriser type evidence
-                if isinstance(evidence, list): evidence = evidence[0] if evidence else ""
-                if not isinstance(evidence, str): evidence = str(evidence)
-                
                 evidence_clean = evidence.strip()
                 if len(evidence_clean) > 10 and evidence_clean not in file_content:
                     evidence_normalized = ' '.join(evidence_clean.split())
                     file_normalized = ' '.join(file_content.split())
                     if evidence_normalized not in file_normalized:
-                        add_log(f"�️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
+                        add_log(f"🔍 Filtré (preuve textuelle absente): {title}", "warning")
                         continue
         else:
             # 🧠 DEEP/DEVSECOPS: Preuve structurelle
@@ -685,24 +638,20 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
                 # Extraire les identifiants (noms de fonctions, variables)
                 identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b', evidence)
                 if identifiers:
-                    # Au moins 1 identifiant suffit en Deep/DevSecOps si longueur > 4
+                    # Au moins 2 identifiants doivent exister dans le fichier
                     matches = sum(1 for ident in identifiers if ident in file_content)
-                    if matches >= 1:
+                    if matches >= 2 or (len(identifiers) == 1 and matches == 1):
                         has_valid_proof = True
             
             # Check 3: Preuve textuelle exacte (bonus)
             if not has_valid_proof and evidence and file_content:
-                # V3.1: Sécuriser type evidence
-                if isinstance(evidence, list): evidence = evidence[0] if evidence else ""
-                if not isinstance(evidence, str): evidence = str(evidence)
-
                 evidence_clean = evidence.strip()
                 if len(evidence_clean) > 5 and evidence_clean in file_content:
                     has_valid_proof = True
             
             # Si aucune preuve valide en Deep, on filtre (mais moins strict qu'en Rapid)
             if not has_valid_proof and evidence:
-                add_log(f"�️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
+                add_log(f"🔍 Filtré (preuve structurelle insuffisante): {title}", "info")
                 continue
         
         # ==========================================
@@ -713,7 +662,7 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             is_forbidden = False
             for forbidden in forbidden_types:
                 if forbidden.upper() in vuln_type or forbidden.upper() in title.upper():
-                    add_log(f"�️ Filtered: {title} | reason=impossible_in_{file_ext} ({forbidden})", "info")
+                    add_log(f"🚫 Filtré (impossible en {file_ext}): {title} ({forbidden})", "warning")
                     is_forbidden = True
                     break
             if is_forbidden:
@@ -749,12 +698,6 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     # Evidence (preuve)
     evidence = vuln.get("evidence", vuln.get("snippet", ""))
     
-    # V3.1: Sécuriser type evidence (si liste retournée par IA)
-    if isinstance(evidence, list): 
-        evidence = evidence[0] if evidence else ""
-    if not isinstance(evidence, str):
-        evidence = str(evidence)
-    
     # ECO RULE #6: Calculer les lignes à partir de l'evidence, pas de l'IA
     line_start, line_end = find_code_lines(file_content, evidence)
     
@@ -769,14 +712,8 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     # Snippet de code
     snippet = evidence if evidence else extract_code_context(filepath, str(line_start)) if line_start else "Code non disponible"
     
-    # V3.1: Confiance absolue en l'IA pour la sévérité initiale (normalisée)
-    # Gère les cas où l'IA renvoie une liste par erreur
-    raw_sev = vuln.get("severity", "Low")
-    if isinstance(raw_sev, list): 
-        raw_sev = raw_sev[0] if raw_sev else "Low"
-    
-    sev_raw = str(raw_sev).strip().capitalize()
-    
+    # ECO RULE #5: Appliquer politique de sévérité
+    sev_raw = str(vuln.get("severity", "Low")).capitalize()
     if "crit" in sev_raw.lower():
         sev = "Critical"
     elif "high" in sev_raw.lower():
@@ -786,7 +723,8 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     else:
         sev = "Low"
     
-    # Suppression apply_eco_severity_policy (Legacy Eco Rule)
+    # ECO: Downgrade Critical si preuve faible
+    sev = apply_eco_severity_policy(vuln, evidence, file_content)
     
     confidence = calculate_confidence(vuln, raw_response, filepath)
     
@@ -881,11 +819,10 @@ class StableEngine:
     1 appel IA = 1 analyse simple
     """
     
-    def __init__(self, profile_config: dict, mode_config: dict, ollama_base_url: str = None):
+    def __init__(self, profile_config: dict, mode_config: dict):
         self.profile = profile_config
         self.mode = mode_config
         self.fallback_model = "qwen2.5-coder:7b"  # V2.5: Fallback cohérent
-        self.ollama_base_url = ollama_base_url or OLLAMA_BASE_URL  # Custom ou défaut
 
     def call_ollama(self, prompt: str, filename: str, max_retries=2) -> Optional[dict]:
         """Appel IA simple avec retry et fallback"""
@@ -904,7 +841,7 @@ class StableEngine:
                 add_log(f"🤖 Analyse: {filename} (modèle: {model})", "info")
                 
                 response = requests.post(
-                    f"{self.ollama_base_url}/api/generate",  # V2.5: URL dynamique selon mode
+                    OLLAMA_URL,
                     json={
                         "model": model,
                         "prompt": prompt,
@@ -1020,29 +957,12 @@ class StableEngine:
 # 🚀 ORCHESTRATION DU SCAN
 # ==========================================
 
-def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "auto", ollama_url: Optional[str] = None):
+def run_scan(target: str, profile_key: str, mode_key: str):
     """Orchestration principale du scan"""
     scan_id = str(uuid.uuid4())[:8]
     
-    # V3.0: Début du scan
-    
-    # V2.5: Déterminer l'URL Ollama à utiliser
-    try:
-        base_url = get_ollama_base_url(ollama_mode=ollama_mode, ollama_url=ollama_url)
-        add_log(f"🔗 Ollama: {ollama_mode} mode ({base_url})", "info")
-    except ValueError as e:
-        add_log(f"❌ Erreur config Ollama: {e}", "error")
-        scan_state["is_scanning"] = False
-        return
-    
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
-    
-    # V3.0: Logs de configuration
-    add_log(f"�️ Nexus V3.0 Stable - Session #{scan_id}")
-    add_log(f"📊 Profil: {profile['label']} | Mode: {mode['label']}")
-    add_log(f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}")
-    
     
     scan_state.update({
         "id": scan_id,
@@ -1068,12 +988,14 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         }
     })
     
-    add_log(f"� Initialisation du scan...", "info")
+    add_log(f"🛡️ Nexus V2.5 Stable - Session #{scan_id}")
+    add_log(f"📊 Profil: {profile['label']} | Mode: {mode['label']}")
+    add_log(f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}")
 
     # V2.5: Vérification et installation automatique du modèle
     model_name = profile["model"]
     add_log(f"🤖 Vérification du modèle {model_name}...", "info")
-    if not ensure_model_available(model_name, base_url):  # V3.0: Passer URL dynamique
+    if not ensure_model_available(model_name):
         add_log(f"❌ Impossible d'installer le modèle {model_name}. Scan annulé.", "critical")
         scan_state["is_scanning"] = False
         return
@@ -1084,41 +1006,24 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
     try:
         # Clone si URL Git
         if target.startswith(("http", "git@")):
-            # V3.0 FIX: Créer répertoire UNIQUE avec prefix
-            tmp_dir = tempfile.mkdtemp(prefix="nexus_scan_")
-            
-            # V3.0 FIX: Vérifier qu'il est bien vide (sécurité)
-            if os.path.exists(tmp_dir) and os.listdir(tmp_dir):
-                import shutil
-                add_log(f"⚠️ tmp_dir non-vide, nettoyage...", "warning")
-                shutil.rmtree(tmp_dir)
-                os.makedirs(tmp_dir)
-            
-            add_log(f"📥 Clonage du dépôt: {target}", "info")
-            add_log(f"📂 Destination: {tmp_dir}", "info")
+            tmp_dir = tempfile.mkdtemp()
+            add_log(f"📥 Clonage du dépôt...", "info")
             Repo.clone_from(target, tmp_dir)
             target_dir = tmp_dir
-            add_log(f"✅ Clone réussi", "info")
         
         scan_state["target_dir"] = target_dir
         
         # Collecte des fichiers selon le mode
         files = []
         extensions = mode["file_extensions"]
-        # V3.0 FIX: Exclure explicitement audit_logs et reports pour éviter l'auto-scan
-        exclude = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv', 'audit_logs', 'reports', 'coverage'}
+        exclude = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv'}
         
-        # V3.0: Scanner le répertoire
         for root, dirs, filenames in os.walk(target_dir):
             dirs[:] = [d for d in dirs if d not in exclude]
-            
             for f in filenames:
-                full_path = os.path.join(root, f)
-                
-                # V3.0: Ignorer fichiers build-time en Rapid/Deep
+                # V2.5: Ignorer fichiers build-time en Rapid/Deep
                 if mode_key in ("rapid", "deep") and f in BUILD_TIME_FILES:
                     continue
-                
                 if f.endswith(extensions) or (mode_key == "devsecops" and f in ['Dockerfile', 'docker-compose.yml']):
                     files.append(os.path.join(root, f))
         
@@ -1138,7 +1043,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
 
         add_log(f"📁 {total_files} fichiers à analyser", "info")
 
-        engine = StableEngine(profile, mode, ollama_base_url=base_url)
+        engine = StableEngine(profile, mode)
         start_ts = time.time()
         
         for i, filepath in enumerate(files):
@@ -1212,14 +1117,6 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         add_log(f"🔥 Erreur Critique: {str(e)}", "critical")
     finally:
         scan_state["is_scanning"] = False
-        # V3.0: Cleanup tmp_dir si clone Git
-        if tmp_dir and os.path.exists(tmp_dir):
-            try:
-                import shutil
-                shutil.rmtree(tmp_dir)
-                add_log(f"🧹 Nettoyage du répertoire temporaire", "info")
-            except Exception as e:
-                print(f"[Cleanup] Erreur lors du nettoyage: {e}")
 
 # ==========================================
 # 📡 ENDPOINTS API
@@ -1245,51 +1142,8 @@ async def get_modes():
 async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     if scan_state["is_scanning"]:
         return {"success": False, "msg": "Scan en cours"}
-    background_tasks.add_task(
-        run_scan, 
-        request.target, 
-        request.profile, 
-        request.mode,
-        request.ollama_mode,  # V2.5: Mode de connexion Ollama
-        request.ollama_url    # V2.5: URL custom si remote
-    )
+    background_tasks.add_task(run_scan, request.target, request.profile, request.mode)
     return {"success": True, "msg": f"Scan lancé (profil: {request.profile}, mode: {request.mode})"}
-
-@app.post("/ollama/test")
-async def test_ollama(request: dict):
-    """Teste la connexion à un serveur Ollama et liste les modèles"""
-    url = request.get("url", "").strip()
-    
-    if not url:
-        return {"ok": False, "message": "URL manquante"}
-    
-    try:
-        base_url = normalize_ollama_url(url)
-        test_url = f"{base_url}/api/tags"
-        
-        response = requests.get(test_url, timeout=5)
-        
-        if response.status_code == 200:
-            data = response.json()
-            models = [m.get("name", "unknown") for m in data.get("models", [])][:10]  # Max 10 modèles
-            return {
-                "ok": True,
-                "message": f"Connexion OK ({len(models)} modèles disponibles)",
-                "models": models,
-                "url": base_url
-            }
-        else:
-            return {"ok": False, "message": f"HTTP {response.status_code}"}
-    
-    except requests.exceptions.Timeout:
-        return {"ok": False, "message": "Timeout (5s) - Serveur inaccessible"}
-    except requests.exceptions.ConnectionError:
-        return {"ok": False, "message": "Erreur de connexion - vérifier l'URL et le port"}
-    except ValueError as e:
-        return {"ok": False, "message": str(e)}
-    except Exception as e:
-        return {"ok": False, "message": f"Erreur: {str(e)[:100]}"}
-
 
 @app.post("/scan/stop")
 async def stop_scan():
@@ -1356,7 +1210,7 @@ async def export_report_html():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Nexus Auditor V3.0 Report - {datetime.now().strftime('%Y-%m-%d')}</title>
+        <title>Nexus Auditor V2.5 Report - {datetime.now().strftime('%Y-%m-%d')}</title>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 40px; color: #333; }}
             h1 {{ border-bottom: 2px solid #6366f1; padding-bottom: 10px; }}
@@ -1379,7 +1233,7 @@ async def export_report_html():
     <body>
         <div class="header">
             <div>
-                <h1>🛡️ Nexus Auditor V3.0 Stable Report</h1>
+                <h1>🛡️ Nexus Auditor V2.5 Stable Report</h1>
                 <p>Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
                 <p>Scan ID: {scan_state.get('id', 'N/A')}</p>
                 <p>Profil: {scan_state.get('profile', 'N/A')} | Mode: {scan_state.get('mode', 'N/A')}</p>
@@ -1405,7 +1259,7 @@ async def export_report_html():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("🛡️ Nexus Auditor V3.0 Stable")
+    print("🛡️ Nexus Auditor V2.5 Stable")
     print("=" * 60)
     print("✨ Basé sur V2.2 (moteur stable)")
     print("✨ Prompt IA strict anti-hallucination")

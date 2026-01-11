@@ -171,26 +171,26 @@ CODE FILE ({filename}):
 # ==========================================
 # ⚡ PROFILS DE PUISSANCE (INFRASTRUCTURE)
 # ==========================================
-# V3.1: Calibrage Strict Hardware (LOCKED for Stability)
+# V3.1: Calibrage Strict Hardware
 POWER_PROFILES = {
     "eco": {
         "label": "🍃 Eco (Mac M1 / CPU)",
-        "description": "Stabilité maximale (Low Ram)",
+        "description": "Stabilité maximale > Exhaustivité",
         "model": "qwen2.5-coder:7b",
         "num_ctx": 8192,
         "num_predict": 1024,
-        "chunk_size": 12000, # Approx 4000 tokens (safe for 8k ctx)
-        "timeout": 60,
+        "chunk_size": 6000,
+        "timeout": 90,
         "parallel_files": 1,
     },
     "balanced": {
         "label": "⚖️ Balanced (RTX 3060)",
-        "description": "Précision stable (Mid Ram)",
+        "description": "Précision stable",
         "model": "qwen2.5-coder:14b",
         "num_ctx": 16384,
         "num_predict": 2048,
-        "chunk_size": 24000, # Approx 8000 tokens (safe for 16k ctx)
-        "timeout": 90,
+        "chunk_size": 10000,
+        "timeout": 120,
         "parallel_files": 1,
     },
     "elite": {
@@ -199,7 +199,7 @@ POWER_PROFILES = {
         "model": "qwen2.5-coder:32b",
         "num_ctx": 32768,
         "num_predict": 4096,
-        "chunk_size": 40000,
+        "chunk_size": 15000,
         "timeout": 180,
         "parallel_files": 2,
     },
@@ -209,7 +209,7 @@ POWER_PROFILES = {
         "model": "qwen2.5-coder:32b",
         "num_ctx": 65536,
         "num_predict": 8192,
-        "chunk_size": 80000,
+        "chunk_size": 25000,
         "timeout": 300,
         "parallel_files": 4,
     }
@@ -502,7 +502,7 @@ def extract_json_from_text(text: str) -> list:
 def find_code_lines(file_content: str, evidence: str) -> tuple:
     """
     Calcule les numéros de ligne START/END à partir de la preuve.
-    V3.1: Support Fuzzy Matching (ignore espaces)
+    Retourne (line_start, line_end) ou (None, None) si non trouvé.
     """
     if not evidence or not file_content:
         return (None, None)
@@ -513,33 +513,23 @@ def find_code_lines(file_content: str, evidence: str) -> tuple:
     
     lines = file_content.split('\n')
     
-    # 1. Exact Match (Ligne unique)
+    # Chercher la preuve dans le fichier
     for i, line in enumerate(lines, start=1):
         if evidence_clean in line:
-            return (i, i)
-    
-    # 2. Exact Match (Multi-lignes)
-    if evidence_clean in file_content:
-        # Trouver l'offset
-        start_idx = file_content.find(evidence_clean)
-        # Compter les \n avant
-        start_line = file_content.count('\n', 0, start_idx) + 1
-        end_line = start_line + evidence_clean.count('\n')
-        return (start_line, end_line)
-
-    # 3. Fuzzy Match (Ignore Whitespace)
-    # C'est coûteux, on le fait seulement si exact match échoue
-    ev_normalized = ''.join(evidence_clean.split())
-    if len(ev_normalized) < 10: # Trop court pour fuzzy fiable
-        return (None, None)
+            return (i, i)  # Ligne unique pour l'instant
         
-    for i in range(len(lines)):
-        # Optimisation: Check fenêtre glissante
-        # (Complexe à implémenter parfaitement, on fait simple: check ligne par ligne normalisée)
-        line_norm = ''.join(lines[i].split())
-        if ev_normalized in line_norm:
-            return (i + 1, i + 1)
-            
+    # Si preuve multi-lignes, chercher le début
+    evidence_lines = evidence_clean.split('\n')
+    if len(evidence_lines) > 1:
+        for i in range(len(lines) - len(evidence_lines) + 1):
+            match = True
+            for j, ev_line in enumerate(evidence_lines):
+                if ev_line.strip() not in lines[i + j]:
+                    match = False
+                    break
+            if match:
+                return (i + 1, i + len(evidence_lines))
+    
     return (None, None)
 
 # ==========================================
@@ -587,7 +577,7 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
     V2.5: Filtrage POST-IA strict avec validation de preuve réelle.
     C'est ici que la logique produit s'applique, PAS dans le prompt.
     """
-    severity_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Unknown": 0}
+    severity_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
     
     # V3.0 DEBUG: Log avant filtrage
     add_log(f"🔍 FILTRAGE: {len(vulns)} vulns brutes reçues pour {os.path.basename(filepath)}", "info")
@@ -615,13 +605,10 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
         vuln_type = v.get('type', '').upper()
         
         # 1. Normalisation Sévérité
-        raw_severity = v.get("severity", "Unknown") # V3.1 FIX: Unknown par défaut (était Low)
-        normalized_severity = raw_severity.strip().capitalize() if isinstance(raw_severity, str) else "Unknown"
+        raw_severity = v.get("severity", "Low")
+        normalized_severity = raw_severity.strip().capitalize() if isinstance(raw_severity, str) else "Low"
         if normalized_severity not in severity_order:
-            if normalized_severity == "Unknown":
-                pass # Conserver Unknown
-            else:
-                normalized_severity = "Low" # Fallback pour typos seulement
+            normalized_severity = "Low"
         v["severity"] = normalized_severity
         
         vuln_sev_val = severity_order.get(normalized_severity, 1)
@@ -633,19 +620,13 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             critical_types = ["SQL", "INJECTION", "RCE", "COMMAND", "XSS", "DESERIAL"]
             is_critical_type = any(ct in vuln_type for ct in critical_types) or any(ct in title.upper() for ct in critical_types)
             
-            # V3.1 FIX: Ne pas filtrer si Unknown mais type critique
             if is_critical_type and "rapid" not in mode_key:
                  add_log(f"⚠️ Force Keep: {title} (Type Critique malgré Sévérité {normalized_severity})", "warning")
             else:
                 add_log(f"🗑️ Filtered: {title} | severity={normalized_severity} | reason=min_severity<{mode_config['min_severity']} ({mode_key})", "info")
                 continue
 
-        # 3. Filtre Confiance & Détection Prudente (FIX: Rejeter si confidence=0)
-        if vuln_conf == 0 and "confidence" not in v: 
-             # Cas "Ghost Profile" : pas de confiance fournie par l'IA
-             add_log(f"🗑️ Filtered: {title} | reason=no_confidence_provided", "info")
-             continue
-
+        # 3. Filtre Confiance & Détection Prudente
         is_prudent = False
         if vuln_conf < min_conf:
             # Check Prudent Detection (Scope 35-50% généralement)
@@ -686,15 +667,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
                     evidence_normalized = ' '.join(evidence_clean.split())
                     file_normalized = ' '.join(file_content.split())
                     if evidence_normalized not in file_normalized:
-                        # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                        if vuln_sev_val >= 3: # High or Critical
-                            v["evidence_missing"] = True
-                            v["needs_manual_review"] = True
-                            v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                            add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                        else:
-                            add_log(f"🗑️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
-                            continue
+                        add_log(f"�️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
+                        continue
         else:
             # 🧠 DEEP/DEVSECOPS: Preuve structurelle
             # Accepté si: line existe OU evidence partielle OU référence fonction/variable
@@ -728,15 +702,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             
             # Si aucune preuve valide en Deep, on filtre (mais moins strict qu'en Rapid)
             if not has_valid_proof and evidence:
-                # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                if vuln_sev_val >= 3: # High or Critical
-                    v["evidence_missing"] = True
-                    v["needs_manual_review"] = True
-                    v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                    add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                else:
-                    add_log(f"🗑️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
-                    continue
+                add_log(f"�️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
+                continue
         
         # ==========================================
         # FILTRE 4: V2.5 - Vulnérabilités impossibles par langage
@@ -770,7 +737,6 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
 def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_response: str, file_content: str = None) -> dict:
     """
     ECO: Normalise avec calcul de lignes par le moteur et politique de sévérité.
-    V3.1: Force Types Regex (SQLi, XSS, RCE...) pour crédibilité maximale.
     """
     # Lire le contenu si non fourni
     if file_content is None:
@@ -789,7 +755,7 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     if not isinstance(evidence, str):
         evidence = str(evidence)
     
-    # ECO RULE #6: Calculer les lignes à partir de l'evidence
+    # ECO RULE #6: Calculer les lignes à partir de l'evidence, pas de l'IA
     line_start, line_end = find_code_lines(file_content, evidence)
     
     # Fallback: Si le moteur trouve pas, utiliser la ligne de l'IA (avec méfiance)
@@ -803,89 +769,41 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     # Snippet de code
     snippet = evidence if evidence else extract_code_context(filepath, str(line_start)) if line_start else "Code non disponible"
     
-    # V3.1: Normalisation Types & Sévérités par REGEX
-    title = str(vuln.get("title", "")).strip()
-    vtype = str(vuln.get("type", "")).strip().upper()
-    desc = str(vuln.get("description", "")).strip().lower()
-    
-    # Concatener pour recherche de mots-clés
-    full_text = (title + " " + vtype + " " + desc).lower()
-    
-    final_type = vtype
-    min_sev_forced = None
-    
-    # Règles de forcing strictes
-    if "sql" in full_text and "inject" in full_text:
-        final_type = "SQL_INJECTION"
-        min_sev_forced = "High"
-    elif ("xss" in full_text) or ("cross-site" in full_text and "script" in full_text):
-        final_type = "XSS"
-        min_sev_forced = "Medium" # Peut être Low (Reflected) ou High (Stored)
-    elif ("remote code" in full_text) or ("command" in full_text and "inject" in full_text):
-        final_type = "RCE"
-        min_sev_forced = "Critical"
-    elif "deserial" in full_text:
-        final_type = "DESERIALIZATION"
-        min_sev_forced = "High"
-    elif ("hardcoded" in full_text or "clear text" in full_text) and ("password" in full_text or "token" in full_text or "key" in full_text):
-        final_type = "HARDCODED_SECRET"
-        min_sev_forced = "High"
-    elif "path traversal" in full_text or "directory traversal" in full_text:
-        final_type = "PATH_TRAVERSAL"
-        min_sev_forced = "Medium"
-        
     # V3.1: Confiance absolue en l'IA pour la sévérité initiale (normalisée)
-    raw_sev = vuln.get("severity", "Unknown") # V3.1 FIX: Unknown par défaut
+    # Gère les cas où l'IA renvoie une liste par erreur
+    raw_sev = vuln.get("severity", "Low")
     if isinstance(raw_sev, list): 
-        raw_sev = raw_sev[0] if raw_sev else "Unknown"
+        raw_sev = raw_sev[0] if raw_sev else "Low"
     
     sev_raw = str(raw_sev).strip().capitalize()
     
-    # Forcing sévérité minimale si type critique détecté
-    if min_sev_forced:
-        sev_map = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-        current_val = sev_map.get(sev_raw, 1)
-        forced_val = sev_map.get(min_sev_forced, 1)
-        if forced_val > current_val:
-            sev_raw = min_sev_forced
-
-    if "crit" in sev_raw.lower(): sev = "Critical"
-    elif "high" in sev_raw.lower(): sev = "High"
-    elif "med" in sev_raw.lower(): sev = "Medium"
-    elif "low" in sev_raw.lower(): sev = "Low"
-    else: sev = "Unknown" # V3.1 FIX: Unknown par défaut au lieu de Low
-    
-    # V3.1 FIX: Strict confidence handling (0 si absent)
-    if "confidence" in vuln:
-        confidence = calculate_confidence(vuln, raw_response, filepath)
+    if "crit" in sev_raw.lower():
+        sev = "Critical"
+    elif "high" in sev_raw.lower():
+        sev = "High"
+    elif "med" in sev_raw.lower():
+        sev = "Medium"
     else:
-        confidence = 0.0 # Force 0 pour éviter les hallucinations non-confiantes
-
-    # V3.1 FIX: Fallback Description/Fix
-    final_desc = desc if desc and len(desc) > 5 else title
-    if not final_desc: final_desc = f"Potentielle vulnérabilité : {final_type}"
+        sev = "Low"
     
-    final_fix = vuln.get("fix", vuln.get("recommendation", ""))
-    if not final_fix: final_fix = "Voir les recommandations de sécurité standard pour ce type."
+    # Suppression apply_eco_severity_policy (Legacy Eco Rule)
+    
+    confidence = calculate_confidence(vuln, raw_response, filepath)
     
     return {
         "file": filename,
         "filepath": filepath,
-        "title": title if title else final_type,
+        "title": vuln.get("title", vuln.get("type", "Vulnérabilité Inconnue")),
         "severity": sev,
-        "line": line_start,
-        "line_end": line_end,
-        "evidence": evidence,
-        "description": final_desc,
-        "fix": final_fix,
+        "line": line_start,  # ECO: Calculé par le moteur
+        "line_end": line_end,  # ECO: Range si multi-ligne
+        "description": vuln.get("description", "Pas de description fournie."),
+        "fix": vuln.get("fix", vuln.get("recommendation", "Pas de correctif proposé.")),
         "confidence": round(confidence, 2),
         "snippet": snippet,
-        "type": final_type,
+        "type": vuln.get("type", "Unknown"),
         "impact": vuln.get("impact", "Non évalué"),
-        "timestamp": datetime.now().isoformat(),
-        # V3.1 Flags potentiels
-        "evidence_missing": False,
-        "needs_manual_review": False
+        "timestamp": datetime.now().isoformat()
     }
 
 
@@ -1027,12 +945,8 @@ class StableEngine:
 
     def scan_file(self, filepath: str, filename: str) -> list:
         """
-        V3.1 SMART CHUNKING STRATEGY:
-        - Si len < ctx: Envoi complet (1 pass).
-        - Si len > ctx: Découpage intelligent.
-        - Rapid Mode: Max 1 chunk (head).
-        - Deep Mode: Max 2 chunks (head + mid).
-        - Timeout strict par fichier.
+        ECO RULE: 1 fichier = 1 appel IA
+        Pas de chunking, pas de retry, pas de multi-pass.
         """
         if scan_state["should_stop"]:
             return []
@@ -1044,92 +958,57 @@ class StableEngine:
             if not content.strip():
                 return []
             
-            # --- V3.1 SMART CHUNKING ---
-            char_count = len(content)
+            # ECO: Si fichier trop gros, on tronque (pas de chunking)
             chunk_size = self.profile["chunk_size"]
-            max_chunks = self.mode.get("max_chunks_per_file", 100) # Default large
-            
-            chunks = []
-            
-            if char_count <= chunk_size:
-                # 1. Fits in context => 1 Chunk
-                chunks.append(content)
-            else:
-                # 2. Too big => Split
-                # Overlap de 500 chars pour éviter couper code critique
-                overlap = 500
-                start = 0
-                while start < char_count:
-                    end = min(start + chunk_size, char_count)
-                    chunks.append(content[start:end])
-                    start += (chunk_size - overlap)
-                    
-                    if len(chunks) >= max_chunks:
-                        add_log(f"✂️ Limite chunks atteinte ({max_chunks}) pour {filename}", "info")
-                        break
+            if len(content) > chunk_size:
+                add_log(f"⚠️ {filename}: fichier tronqué ({len(content)} → {chunk_size} chars)", "warning")
+                content = content[:chunk_size]
             
             scan_state["current_file"] = filename
+            
+            # ECO: 1 SEUL appel IA par fichier
+            prompt = CORE_PROMPT.format(filename=filename, content=content)
+            
+            # ECO: Timer pour dégradation de confiance si budget dépassé
+            file_start = time.time()
+            result = self.call_ollama(prompt, filename, max_retries=1)  # ECO: 1 retry max
+            file_duration = time.time() - file_start
+            
             all_vulns = []
             
-            file_start_global = time.time()
-            max_time = self.mode.get("max_time_per_file", 60)
-
-            # --- ANALYSE CHUNK PAR CHUNK ---
-            for i, chunk in enumerate(chunks):
-                # Check Global Stop
-                if scan_state["should_stop"]: 
-                    return []
+            if result:
+                data = result["data"]
+                raw_response = result["raw"]
                 
-                # Check File Timeout
-                if (time.time() - file_start_global) > max_time:
-                    add_log(f"⏱️ Timeout fichier atteint ({max_time}s) - Arrêt analyse {filename}", "warning")
-                    break
-
-                prompt = CORE_PROMPT.format(filename=f"{filename} (part {i+1}/{len(chunks)})", content=chunk)
+                if isinstance(data, dict):
+                    data = [data]
                 
-                # Call Ollama
-                result = self.call_ollama(prompt, filename, max_retries=1)
-                
-                if result:
-                    data = result["data"]
-                    raw_response = result["raw"]
-                    
-                    if isinstance(data, dict): data = [data]
-                    if isinstance(data, list):
-                        for v in data:
-                            if not isinstance(v, dict): continue
-                            
-                            # Normalisation (V3.1: Pass full content for line finding)
-                            normalized = normalize_vulnerability(v, filepath, filename, raw_response, content)
-                            
-                            # Ajustement confiance si chunk partiel
-                            if len(chunks) > 1:
-                                normalized["confidence"] = min(normalized["confidence"], 90)
-
-                            all_vulns.append(normalized)
+                if isinstance(data, list):
+                    for v in data:
+                        if not isinstance(v, dict):
+                            add_log(f"⚠️ Élément ignoré (pas un dict): {type(v).__name__}", "warning")
+                            continue
                         
-                        scan_state["successful_analyses"] += 1
-                else:
-                    scan_state["failed_analyses"] += 1
-
-            # --- V3.1 RESCUE PASS (DEEP/DEVSECOPS ONLY) ---
-            # Si 0 findings sur un fichier critique en mode approfondi, on revérifie si on a raté un truc évident
-            # (Limité pour ne pas exploser le temps)
-            if not all_vulns and self.mode["label"] in ["Scan Profond", "DevSecOps (CI/CD)"]:
-                is_risky_file = filename.endswith(('.js', '.ts', '.py', '.php', '.java'))
-                time_left = max_time - (time.time() - file_start_global)
-                
-                if is_risky_file and time_left > 15:
-                    # On ne relance pas une analyse complète (trop cher), mais on loggue pour info
-                    # Future: Pourrait relancer avec prompt "Check specifically for X"
-                    pass 
+                        # ECO: Passer le contenu pour calcul de lignes et politique sévérité
+                        normalized = normalize_vulnerability(v, filepath, filename, raw_response, content)
+                        
+                        # ECO RULE 2: Budget = dégradation de confiance
+                        budget = self.mode.get("max_time_per_file", 60)
+                        if file_duration > budget:
+                            normalized["confidence"] *= 0.85
+                            add_log(f"⏱️ Budget dépassé ({file_duration:.0f}s > {budget}s), confiance dégradée", "info")
+                        
+                        all_vulns.append(normalized)
+                    
+                    scan_state["successful_analyses"] += 1
+            else:
+                scan_state["failed_analyses"] += 1
+                # ECO: Pas de retry, on continue
             
             # Filtrage POST-IA selon le mode (avec contenu pour validation preuve)
-            add_log(f"🔄 Post-processing: {len(all_vulns)} findings bruts", "info")
             filtered_vulns = apply_mode_filters(all_vulns, self.mode, filepath, content)
             
             return filtered_vulns
-
 
         except Exception as e:
             add_log(f"❌ Erreur analyse {filename}: {e}", "error")

@@ -835,18 +835,6 @@ export default function App() {
                                  </div>
 
                                  <div className="space-y-8">
-                                    {/* V3.1: Manual Review Note / Evidence Missing */}
-                                    {(selectedFinding.note || selectedFinding.needs_manual_review) && (
-                                       <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 flex items-start gap-3">
-                                          <AlertTriangle className="text-yellow-500 shrink-0 mt-0.5" size={18} />
-                                          <div>
-                                             <h3 className="text-yellow-500 font-bold text-sm mb-1">Attention requise</h3>
-                                             <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-                                                {selectedFinding.note || "Examen manuel requis (Preuve manquante)"}
-                                             </p>
-                                          </div>
-                                       </div>
-                                    )}
                                     {/* Description */}
                                     <div>
                                        <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Analyse Technique</h3>

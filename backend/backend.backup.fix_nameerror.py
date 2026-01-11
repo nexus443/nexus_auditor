@@ -587,7 +587,7 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
     V2.5: Filtrage POST-IA strict avec validation de preuve réelle.
     C'est ici que la logique produit s'applique, PAS dans le prompt.
     """
-    severity_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Unknown": 0}
+    severity_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
     
     # V3.0 DEBUG: Log avant filtrage
     add_log(f"🔍 FILTRAGE: {len(vulns)} vulns brutes reçues pour {os.path.basename(filepath)}", "info")
@@ -615,13 +615,10 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
         vuln_type = v.get('type', '').upper()
         
         # 1. Normalisation Sévérité
-        raw_severity = v.get("severity", "Unknown") # V3.1 FIX: Unknown par défaut (était Low)
-        normalized_severity = raw_severity.strip().capitalize() if isinstance(raw_severity, str) else "Unknown"
+        raw_severity = v.get("severity", "Low")
+        normalized_severity = raw_severity.strip().capitalize() if isinstance(raw_severity, str) else "Low"
         if normalized_severity not in severity_order:
-            if normalized_severity == "Unknown":
-                pass # Conserver Unknown
-            else:
-                normalized_severity = "Low" # Fallback pour typos seulement
+            normalized_severity = "Low"
         v["severity"] = normalized_severity
         
         vuln_sev_val = severity_order.get(normalized_severity, 1)
@@ -633,19 +630,13 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             critical_types = ["SQL", "INJECTION", "RCE", "COMMAND", "XSS", "DESERIAL"]
             is_critical_type = any(ct in vuln_type for ct in critical_types) or any(ct in title.upper() for ct in critical_types)
             
-            # V3.1 FIX: Ne pas filtrer si Unknown mais type critique
             if is_critical_type and "rapid" not in mode_key:
                  add_log(f"⚠️ Force Keep: {title} (Type Critique malgré Sévérité {normalized_severity})", "warning")
             else:
                 add_log(f"🗑️ Filtered: {title} | severity={normalized_severity} | reason=min_severity<{mode_config['min_severity']} ({mode_key})", "info")
                 continue
 
-        # 3. Filtre Confiance & Détection Prudente (FIX: Rejeter si confidence=0)
-        if vuln_conf == 0 and "confidence" not in v: 
-             # Cas "Ghost Profile" : pas de confiance fournie par l'IA
-             add_log(f"🗑️ Filtered: {title} | reason=no_confidence_provided", "info")
-             continue
-
+        # 3. Filtre Confiance & Détection Prudente
         is_prudent = False
         if vuln_conf < min_conf:
             # Check Prudent Detection (Scope 35-50% généralement)
@@ -686,15 +677,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
                     evidence_normalized = ' '.join(evidence_clean.split())
                     file_normalized = ' '.join(file_content.split())
                     if evidence_normalized not in file_normalized:
-                        # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                        if vuln_sev_val >= 3: # High or Critical
-                            v["evidence_missing"] = True
-                            v["needs_manual_review"] = True
-                            v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                            add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                        else:
-                            add_log(f"🗑️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
-                            continue
+                        add_log(f"�️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
+                        continue
         else:
             # 🧠 DEEP/DEVSECOPS: Preuve structurelle
             # Accepté si: line existe OU evidence partielle OU référence fonction/variable
@@ -728,15 +712,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             
             # Si aucune preuve valide en Deep, on filtre (mais moins strict qu'en Rapid)
             if not has_valid_proof and evidence:
-                # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                if vuln_sev_val >= 3: # High or Critical
-                    v["evidence_missing"] = True
-                    v["needs_manual_review"] = True
-                    v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                    add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                else:
-                    add_log(f"🗑️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
-                    continue
+                add_log(f"�️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
+                continue
         
         # ==========================================
         # FILTRE 4: V2.5 - Vulnérabilités impossibles par langage
@@ -835,9 +812,9 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
         min_sev_forced = "Medium"
         
     # V3.1: Confiance absolue en l'IA pour la sévérité initiale (normalisée)
-    raw_sev = vuln.get("severity", "Unknown") # V3.1 FIX: Unknown par défaut
+    raw_sev = vuln.get("severity", "Low")
     if isinstance(raw_sev, list): 
-        raw_sev = raw_sev[0] if raw_sev else "Unknown"
+        raw_sev = raw_sev[0] if raw_sev else "Low"
     
     sev_raw = str(raw_sev).strip().capitalize()
     
@@ -852,21 +829,9 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     if "crit" in sev_raw.lower(): sev = "Critical"
     elif "high" in sev_raw.lower(): sev = "High"
     elif "med" in sev_raw.lower(): sev = "Medium"
-    elif "low" in sev_raw.lower(): sev = "Low"
-    else: sev = "Unknown" # V3.1 FIX: Unknown par défaut au lieu de Low
+    else: sev = "Low"
     
-    # V3.1 FIX: Strict confidence handling (0 si absent)
-    if "confidence" in vuln:
-        confidence = calculate_confidence(vuln, raw_response, filepath)
-    else:
-        confidence = 0.0 # Force 0 pour éviter les hallucinations non-confiantes
-
-    # V3.1 FIX: Fallback Description/Fix
-    final_desc = desc if desc and len(desc) > 5 else title
-    if not final_desc: final_desc = f"Potentielle vulnérabilité : {final_type}"
-    
-    final_fix = vuln.get("fix", vuln.get("recommendation", ""))
-    if not final_fix: final_fix = "Voir les recommandations de sécurité standard pour ce type."
+    confidence = calculate_confidence(vuln, raw_response, filepath)
     
     return {
         "file": filename,
@@ -876,16 +841,13 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
         "line": line_start,
         "line_end": line_end,
         "evidence": evidence,
-        "description": final_desc,
-        "fix": final_fix,
+        "description": vuln.get("description", "Pas de description fournie."),
+        "fix": vuln.get("fix", vuln.get("recommendation", "Pas de correctif proposé.")),
         "confidence": round(confidence, 2),
         "snippet": snippet,
         "type": final_type,
         "impact": vuln.get("impact", "Non évalué"),
-        "timestamp": datetime.now().isoformat(),
-        # V3.1 Flags potentiels
-        "evidence_missing": False,
-        "needs_manual_review": False
+        "timestamp": datetime.now().isoformat()
     }
 
 
@@ -1123,11 +1085,7 @@ class StableEngine:
                     # On ne relance pas une analyse complète (trop cher), mais on loggue pour info
                     # Future: Pourrait relancer avec prompt "Check specifically for X"
                     pass 
-            
-            # Filtrage POST-IA selon le mode (avec contenu pour validation preuve)
-            add_log(f"🔄 Post-processing: {len(all_vulns)} findings bruts", "info")
-            filtered_vulns = apply_mode_filters(all_vulns, self.mode, filepath, content)
-            
+
             return filtered_vulns
 
 

@@ -1,5 +1,62 @@
 [
   {
+    "id": "8c43477e",
+    "date": "2026-01-11T23:32:12.382517",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 10,
+      "medium": 0,
+      "low": 0,
+      "files": 30,
+      "skipped": 0
+    },
+    "confidence_score": 84.25,
+    "duration_seconds": 64,
+    "successful_analyses": 33,
+    "failed_analyses": 0
+  },
+  {
+    "id": "1394250b",
+    "date": "2026-01-11T22:53:35.529824",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 4,
+      "medium": 0,
+      "low": 0,
+      "files": 30,
+      "skipped": 0
+    },
+    "confidence_score": 83.5,
+    "duration_seconds": 51,
+    "successful_analyses": 33,
+    "failed_analyses": 0
+  },
+  {
+    "id": "010ff5be",
+    "date": "2026-01-11T22:38:43.718386",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "eco",
+    "mode": "rapid",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 30,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 59,
+    "successful_analyses": 33,
+    "failed_analyses": 30
+  },
+  {
     "id": "5e253e64",
     "date": "2026-01-08T14:49:51.347871",
     "target": "https://github.com/nexus443/nexus_auditor.git",

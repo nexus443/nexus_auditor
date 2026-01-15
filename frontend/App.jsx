@@ -16,6 +16,25 @@ const SEVERITY_STYLES = {
    LOW: { badge: 'bg-blue-500/10 text-blue-500 border-blue-500/20', icon: CheckCircle, color: 'text-blue-500', border: 'border-blue-500' },
 };
 
+// MODE STYLES (static to prevent Tailwind purge)
+const MODE_STYLES = {
+   rapid: {
+      active: 'border-emerald-500 bg-emerald-500/10',
+      iconActive: 'text-emerald-400',
+      iconInactive: 'text-slate-400'
+   },
+   deep: {
+      active: 'border-indigo-500 bg-indigo-500/10',
+      iconActive: 'text-indigo-400',
+      iconInactive: 'text-slate-400'
+   },
+   devsecops: {
+      active: 'border-orange-500 bg-orange-500/10',
+      iconActive: 'text-orange-400',
+      iconInactive: 'text-slate-400'
+   }
+};
+
 export default function App() {
    const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
 
@@ -451,27 +470,30 @@ export default function App() {
 
                               <div className="grid grid-cols-1 gap-2">
                                  {[
-                                    { key: 'rapid', label: 'Scan Rapide', icon: Zap, color: 'emerald', desc: '⏱ 1-2 min • 🎯 Essentiel' },
-                                    { key: 'deep', label: 'Scan Profond', icon: Search, color: 'indigo', desc: '⏱ Long • 🔍 Précis' },
-                                    { key: 'devsecops', label: 'DevSecOps', icon: Shield, color: 'orange', desc: '🚀 Production • 🔐 Conformité' }
-                                 ].map(({ key, label, icon: Icon, color, desc }) => (
-                                    <button
-                                       key={key}
-                                       onClick={() => setScanMode(key)}
-                                       className={`relative p-3 rounded-lg border transition-all text-left ${scanMode === key
-                                          ? `border-${color}-500 bg-${color}-500/10`
-                                          : theme === 'dark'
-                                             ? 'border-slate-800 bg-slate-950 hover:border-slate-600'
-                                             : 'border-slate-300 bg-slate-100 hover:border-slate-400'
-                                          }`}
-                                    >
-                                       <div className="flex items-center gap-2 mb-1">
-                                          <Icon className={`w-5 h-5 ${scanMode === key ? `text-${color}-400` : 'text-slate-400'}`} />
-                                          <h3 className="font-semibold text-sm">{label}</h3>
-                                       </div>
-                                       <div className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>{desc}</div>
-                                    </button>
-                                 ))}
+                                    { key: 'rapid', label: 'Scan Rapide', icon: Zap, desc: '⏱ 1-2 min • 🎯 Essentiel' },
+                                    { key: 'deep', label: 'Scan Profond', icon: Search, desc: '⏱ Long • 🔍 Précis' },
+                                    { key: 'devsecops', label: 'DevSecOps', icon: Shield, desc: '🚀 Production • 🔐 Conformité' }
+                                 ].map(({ key, label, icon: Icon, desc }) => {
+                                    const modeStyle = MODE_STYLES[key];
+                                    return (
+                                       <button
+                                          key={key}
+                                          onClick={() => setScanMode(key)}
+                                          className={`relative p-3 rounded-lg border transition-all text-left ${scanMode === key
+                                             ? modeStyle.active
+                                             : theme === 'dark'
+                                                ? 'border-slate-800 bg-slate-950 hover:border-slate-600'
+                                                : 'border-slate-300 bg-slate-100 hover:border-slate-400'
+                                             }`}
+                                       >
+                                          <div className="flex items-center gap-2 mb-1">
+                                             <Icon className={`w-5 h-5 ${scanMode === key ? modeStyle.iconActive : modeStyle.iconInactive}`} />
+                                             <h3 className="font-semibold text-sm">{label}</h3>
+                                          </div>
+                                          <div className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>{desc}</div>
+                                       </button>
+                                    );
+                                 })}
                               </div>
                            </div>
                         </div>

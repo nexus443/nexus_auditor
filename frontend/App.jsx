@@ -10,7 +10,7 @@ import ExecutiveView from './components/ExecutiveView.jsx';
 
 const API_URL = "/api";
 
-// SEVERITY STYLES (from Gemini)
+// SEVERITY STYLES 
 const SEVERITY_STYLES = {
    CRITICAL: { badge: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertOctagon, color: 'text-red-500', border: 'border-red-500' },
    HIGH: { badge: 'bg-orange-500/10 text-orange-500 border-orange-500/20', icon: AlertTriangle, color: 'text-orange-500', border: 'border-orange-500' },
@@ -60,7 +60,7 @@ export default function App() {
       confidence_score: 0
    });
 
-   // Results Explorer State (from Gemini)
+   // Results Explorer State 
    const [selectedVulnId, setSelectedVulnId] = useState(null);
    const [resultsFilter, setResultsFilter] = useState('ALL');
    const [resultsSearch, setResultsSearch] = useState('');
@@ -93,6 +93,9 @@ export default function App() {
       ollama: 'unknown',
       lastCheck: null
    });
+
+   // Log filtering for advanced log viewer
+   const [logFilter, setLogFilter] = useState('all'); // 'all' | 'info' | 'warn' | 'error'
 
    useEffect(() => {
       localStorage.setItem('theme', theme);
@@ -356,7 +359,7 @@ export default function App() {
       'Low': '🟩'
    };
 
-   // === RESULTS EXPLORER LOGIC (from Gemini) ===
+   // === RESULTS EXPLORER LOGIC  ===
    const selectedFinding = status.vulnerabilities.find(v => v.id === selectedVulnId);
    const filteredFindings = resultsFilter === 'ALL'
       ? status.vulnerabilities
@@ -737,20 +740,116 @@ export default function App() {
                      </div>
                   </div>
 
+                  {/* Pipeline Stages Timeline */}
+                  <div className="mb-6">
+                     <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                        <div className="flex items-center gap-2 mb-3">
+                           <Layers className="w-4 h-4 text-indigo-400" />
+                           <h3 className="text-sm font-semibold">Pipeline Progress</h3>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                           {[
+                              { label: 'Normalize', icon: '📋', stage: 1 },
+                              { label: 'Index', icon: '🔍', stage: 2 },
+                              { label: 'Analyze', icon: '🧠', stage: 3 },
+                              { label: 'Correlate', icon: '🔗', stage: 4 },
+                              { label: 'Report', icon: '📊', stage: 5 }
+                           ].map((s, i) => {
+                              // Heuristic: deduce stage from progress
+                              const currentStage = Math.ceil((status.progress / 100) * 5);
+                              const isActive = currentStage === s.stage;
+                              const isDone = currentStage > s.stage;
+
+                              return (
+                                 <div key={i} className="flex-1">
+                                    <div className={`text-center p-2 rounded-lg border transition-all ${isDone
+                                       ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
+                                       : isActive
+                                          ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400 animate-pulse'
+                                          : theme === 'dark' ? 'bg-slate-800 border-slate-700 text-slate-500' : 'bg-slate-100 border-slate-300 text-slate-400'
+                                       }`}>
+                                       <div className="text-lg mb-1">{s.icon}</div>
+                                       <div className="text-xs font-medium">{s.label}</div>
+                                       {isDone && <div className="text-[10px] mt-0.5">✓</div>}
+                                       {isActive && <div className="text-[10px] mt-0.5">...</div>}
+                                    </div>
+                                    {i < 4 && (
+                                       <div className={`h-0.5 mt-2 ${isDone ? 'bg-emerald-500' : 'bg-slate-700'}`} />
+                                    )}
+                                 </div>
+                              );
+                           })}
+                        </div>
+                     </div>
+                  </div>
+
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                      {/* Terminal */}
                      <div className="lg:col-span-2">
                         <div className="bg-slate-950 rounded-xl border border-slate-800 h-[400px] flex flex-col font-mono text-xs overflow-hidden shadow-2xl">
-                           <div className="px-4 py-2 border-b border-slate-800 bg-slate-900/50 flex items-center gap-2 text-slate-400">
-                              <Terminal size={14} /> Output Console
+                           <div className="px-4 py-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between">
+                              <div className="flex items-center gap-2 text-slate-400">
+                                 <Terminal size={14} /> Output Console
+                              </div>
+                              <div className="flex items-center gap-2">
+                                 {/* Log Filters */}
+                                 <div className="flex items-center gap-1 bg-slate-900 rounded px-1">
+                                    {['all', 'info', 'warn', 'error'].map(f => (
+                                       <button
+                                          key={f}
+                                          onClick={() => setLogFilter(f)}
+                                          className={`px-2 py-0.5 text-[10px] rounded transition-all ${logFilter === f
+                                             ? 'bg-indigo-600 text-white'
+                                             : 'text-slate-500 hover:text-slate-300'
+                                             }`}
+                                       >
+                                          {f.toUpperCase()}
+                                       </button>
+                                    ))}
+                                 </div>
+                                 {/* Download Logs */}
+                                 <button
+                                    onClick={() => {
+                                       const logText = status.logs.map(l => `[${l.time}] ${l.msg}`).join('\n');
+                                       const blob = new Blob([logText], { type: 'text/plain' });
+                                       const url = URL.createObjectURL(blob);
+                                       const a = document.createElement('a');
+                                       a.href = url;
+                                       a.download = `nexus-scan-logs-${Date.now()}.txt`;
+                                       a.click();
+                                       URL.revokeObjectURL(url);
+                                       toast.success('Logs téléchargés');
+                                    }}
+                                    className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
+                                    title="Download logs"
+                                 >
+                                    <Download size={12} />
+                                 </button>
+                              </div>
                            </div>
                            <div className="flex-1 p-4 overflow-y-auto space-y-1 custom-scrollbar">
-                              {status.logs.map((log, i) => (
-                                 <div key={i} className="flex gap-3 opacity-90 hover:bg-slate-900/50 p-0.5">
+                              {status.logs.filter(log => {
+                                 if (logFilter === 'all') return true;
+                                 const msg = log.msg.toLowerCase();
+                                 if (logFilter === 'info') return !msg.includes('⚠️') && !msg.includes('❌') && !msg.includes('error');
+                                 if (logFilter === 'warn') return msg.includes('⚠️') || msg.includes('warning');
+                                 if (logFilter === 'error') return msg.includes('❌') || msg.includes('error') || msg.includes('critical');
+                                 return true;
+                              }).map((log, i) => (
+                                 <div
+                                    key={i}
+                                    className="flex gap-3 opacity-90 hover:bg-slate-900/50 p-0.5 group"
+                                    onClick={() => {
+                                       navigator.clipboard.writeText(`[${log.time}] ${log.msg}`);
+                                       toast.success('Log copié');
+                                    }}
+                                    title="Click to copy"
+                                 >
                                     <span className="text-slate-600 shrink-0">[{log.time}]</span>
                                     <span className={log.type === 'success' ? 'text-emerald-400' : 'text-slate-300'}>
                                        {log.type === 'success' ? '✔ ' : '> '} {log.msg}
                                     </span>
+                                    <Copy className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
                                  </div>
                               ))}
                               <div ref={logEndRef} />
@@ -786,7 +885,7 @@ export default function App() {
                </div>
             )}
 
-            {/* === RESULTS EXPLORER (from Gemini) === */}
+            {/* === RESULTS EXPLORER === */}
             {view === 'results' && (
                <div className="h-[calc(100vh-150px)] flex flex-col">
                   <div className="flex items-center justify-between mb-6 px-1">

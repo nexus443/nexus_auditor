@@ -1,5 +1,97 @@
 [
   {
+    "id": "6d161811",
+    "date": "2026-01-13T13:19:45.166435",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "titan",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 100,
+      "skipped": 0
+    },
+    "duration_seconds": 22
+  },
+  {
+    "id": "5f4169c7",
+    "date": "2026-01-13T10:53:18.315402",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "titan",
+    "mode": "deep",
+    "stats": {
+      "critical": 1,
+      "high": 26,
+      "medium": 24,
+      "low": 0,
+      "files": 100,
+      "skipped": 499
+    },
+    "confidence_score": 83.7,
+    "duration_seconds": 622,
+    "successful_analyses": 100,
+    "failed_analyses": 0
+  },
+  {
+    "id": "85d781a9",
+    "date": "2026-01-13T10:20:17.521822",
+    "target": "https://github.com/juice-shop/juice-shop.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 1,
+      "high": 15,
+      "medium": 2,
+      "low": 0,
+      "files": 100,
+      "skipped": 499
+    },
+    "confidence_score": 81.83,
+    "duration_seconds": 240,
+    "successful_analyses": 101,
+    "failed_analyses": 0
+  },
+  {
+    "id": "aa118708",
+    "date": "2026-01-13T10:11:34.672326",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "deep",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 6,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 20,
+    "successful_analyses": 11,
+    "failed_analyses": 0
+  },
+  {
+    "id": "c238c32a",
+    "date": "2026-01-13T10:05:54.845131",
+    "target": "https://github.com/nexus443/nexus_auditor.git",
+    "profile": "balanced",
+    "mode": "devsecops",
+    "stats": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "files": 11,
+      "skipped": 0
+    },
+    "confidence_score": 0.0,
+    "duration_seconds": 31,
+    "successful_analyses": 17,
+    "failed_analyses": 0
+  },
+  {
     "id": "8c43477e",
     "date": "2026-01-11T23:32:12.382517",
     "target": "https://github.com/juice-shop/juice-shop.git",
@@ -819,48 +911,6 @@
   {
     "id": "dcec5a2a",
     "date": "2025-12-15T19:13:23.515926",
-    "target": "https://github.com/eliboa/TegraRcmGUI.git",
-    "profile": "balanced",
-    "stats": {
-      "critical": 0,
-      "high": 0,
-      "medium": 0,
-      "low": 14,
-      "files": 10
-    },
-    "score": 100
-  },
-  {
-    "id": "7694c6f6",
-    "date": "2025-12-15T19:12:28.954646",
-    "target": "https://github.com/eliboa/TegraRcmGUI.git",
-    "profile": "balanced",
-    "stats": {
-      "critical": 0,
-      "high": 0,
-      "medium": 0,
-      "low": 14,
-      "files": 10
-    },
-    "score": 100
-  },
-  {
-    "id": "c490f0bd",
-    "date": "2025-12-15T19:11:36.017386",
-    "target": "https://github.com/eliboa/TegraRcmGUI.git",
-    "profile": "balanced",
-    "stats": {
-      "critical": 0,
-      "high": 0,
-      "medium": 0,
-      "low": 14,
-      "files": 10
-    },
-    "score": 100
-  },
-  {
-    "id": "938eae93",
-    "date": "2025-12-15T19:10:43.500279",
     "target": "https://github.com/eliboa/TegraRcmGUI.git",
     "profile": "balanced",
     "stats": {

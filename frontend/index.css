@@ -7,3 +7,19 @@ body {
   background-color: #020617; /* slate-950 */
   color: #f1f5f9; /* slate-100 */
 }
+
+/* Toast animations */
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
+}

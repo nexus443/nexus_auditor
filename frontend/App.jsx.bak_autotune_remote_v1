@@ -5,7 +5,6 @@ import {
    Download, History, Zap, Layers, Server, Sun, Moon, Filter, ChevronDown,
    TrendingUp, Wrench, BookOpen, GitCompare, Sparkles, AlertOctagon, Copy
 } from 'lucide-react';
-import { useToasts } from './components/Toast.jsx';
 
 const API_URL = "/api";
 
@@ -17,27 +16,7 @@ const SEVERITY_STYLES = {
    LOW: { badge: 'bg-blue-500/10 text-blue-500 border-blue-500/20', icon: CheckCircle, color: 'text-blue-500', border: 'border-blue-500' },
 };
 
-// MODE STYLES (static to prevent Tailwind purge)
-const MODE_STYLES = {
-   rapid: {
-      active: 'border-emerald-500 bg-emerald-500/10',
-      iconActive: 'text-emerald-400',
-      iconInactive: 'text-slate-400'
-   },
-   deep: {
-      active: 'border-indigo-500 bg-indigo-500/10',
-      iconActive: 'text-indigo-400',
-      iconInactive: 'text-slate-400'
-   },
-   devsecops: {
-      active: 'border-orange-500 bg-orange-500/10',
-      iconActive: 'text-orange-400',
-      iconInactive: 'text-slate-400'
-   }
-};
-
 export default function App() {
-   const toast = useToasts();
    const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
 
    // VIEW STATE (new)
@@ -80,10 +59,6 @@ export default function App() {
    const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || '');
    const [ollamaTesting, setOllamaTesting] = useState(false);
    const [ollamaTestResult, setOllamaTestResult] = useState(null);
-
-   // Validation errors
-   const [targetError, setTargetError] = useState('');
-   const [ollamaUrlError, setOllamaUrlError] = useState('');
 
    useEffect(() => {
       localStorage.setItem('theme', theme);
@@ -159,21 +134,16 @@ export default function App() {
    const scrollToBottom = () => logEndRef.current?.scrollIntoView({ behavior: "smooth" });
 
    const startScan = async () => {
-      // Clear previous errors
-      setTargetError('');
-      setOllamaUrlError('');
+      console.log("🚀 FRONTEND startScan appelé");
+      console.log("  target state =", target);
+      console.log("  scanMode =", scanMode);
+      console.log("  profile =", profile);
 
-      // Validation
-      if (!target || target.trim() === '') {
-         setTargetError('Veuillez entrer une cible (URL Git ou chemin local)');
-         toast.error('Veuillez entrer une cible valide');
-         return;
-      }
+      if (!target) return alert("Veuillez entrer une cible !");
 
+      // V2.5: Validation Ollama remote
       if (ollamaMode === 'remote' && !ollamaUrl.trim()) {
-         setOllamaUrlError('URL Ollama requise en mode distant');
-         toast.error('Veuillez renseigner l\'URL Ollama');
-         return;
+         return alert("Mode serveur distant sélectionné : veuillez renseigner l'URL Ollama.");
       }
 
       try {
@@ -189,12 +159,9 @@ export default function App() {
             })
          });
          setStatus(prev => ({ ...prev, is_scanning: true, progress: 1 }));
-         setView('running');
+         setView('running'); // Switch to running view
          setActiveTab('logs');
-         toast.success('Scan lancé avec succès');
-      } catch (e) {
-         toast.error('Backend hors ligne - vérifiez que le serveur est démarré');
-      }
+      } catch (e) { alert("Backend hors ligne"); }
    };
 
    const stopScan = async () => {
@@ -230,13 +197,13 @@ export default function App() {
          const data = await res.json();
 
          if (data.success) {
-            toast.success(`Patch généré: ${data.patch_file}`, 8000);
+            alert(`✅ Patch généré !\n\nFichier: ${data.patch_file}\n\nAvant: ${data.preview.before}\nAprès: ${data.preview.after}`);
             window.open(`${API_URL}/fix/download/${data.patch_file}`, '_blank');
          } else {
-            toast.error(`Échec génération patch: ${data.error}`);
+            alert(`❌ Échec: ${data.error}`);
          }
       } catch (e) {
-         toast.error('Erreur lors de la génération du patch');
+         alert("Erreur lors de la génération du patch");
       } finally {
          setAutoFixLoading(null);
       }
@@ -345,7 +312,7 @@ export default function App() {
 
    const copyJSON = (obj) => {
       navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
-      toast.success('JSON copié dans le presse-papier');
+      alert('JSON copié dans le presse-papier !');
    };
 
    // Normalize severity for SEVERITY_STYLES mapping
@@ -435,21 +402,14 @@ export default function App() {
                               <input
                                  type="text"
                                  value={target}
-                                 onChange={(e) => { setTarget(e.target.value); setTargetError(''); }}
+                                 onChange={(e) => setTarget(e.target.value)}
                                  placeholder="https://github.com/company/repo.git"
-                                 className={`w-full border rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:ring-1 transition-all font-mono text-sm ${targetError
-                                    ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
-                                    : theme === 'dark'
-                                       ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500 focus:ring-indigo-500'
-                                       : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400 focus:ring-indigo-400'
+                                 className={`w-full border rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:ring-1 transition-all font-mono text-sm ${theme === 'dark'
+                                    ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500 focus:ring-indigo-500'
+                                    : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400 focus:ring-indigo-400'
                                     }`}
                               />
                            </div>
-                           {targetError && (
-                              <p className="text-red-500 text-xs mt-1 flex items-center gap-1">
-                                 <AlertTriangle className="w-3 h-3" /> {targetError}
-                              </p>
-                           )}
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -491,30 +451,27 @@ export default function App() {
 
                               <div className="grid grid-cols-1 gap-2">
                                  {[
-                                    { key: 'rapid', label: 'Scan Rapide', icon: Zap, desc: '⏱ 1-2 min • 🎯 Essentiel' },
-                                    { key: 'deep', label: 'Scan Profond', icon: Search, desc: '⏱ Long • 🔍 Précis' },
-                                    { key: 'devsecops', label: 'DevSecOps', icon: Shield, desc: '🚀 Production • 🔐 Conformité' }
-                                 ].map(({ key, label, icon: Icon, desc }) => {
-                                    const modeStyle = MODE_STYLES[key];
-                                    return (
-                                       <button
-                                          key={key}
-                                          onClick={() => setScanMode(key)}
-                                          className={`relative p-3 rounded-lg border transition-all text-left ${scanMode === key
-                                             ? modeStyle.active
-                                             : theme === 'dark'
-                                                ? 'border-slate-800 bg-slate-950 hover:border-slate-600'
-                                                : 'border-slate-300 bg-slate-100 hover:border-slate-400'
-                                             }`}
-                                       >
-                                          <div className="flex items-center gap-2 mb-1">
-                                             <Icon className={`w-5 h-5 ${scanMode === key ? modeStyle.iconActive : modeStyle.iconInactive}`} />
-                                             <h3 className="font-semibold text-sm">{label}</h3>
-                                          </div>
-                                          <div className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>{desc}</div>
-                                       </button>
-                                    );
-                                 })}
+                                    { key: 'rapid', label: 'Scan Rapide', icon: Zap, color: 'emerald', desc: '⏱ 1-2 min • 🎯 Essentiel' },
+                                    { key: 'deep', label: 'Scan Profond', icon: Search, color: 'indigo', desc: '⏱ Long • 🔍 Précis' },
+                                    { key: 'devsecops', label: 'DevSecOps', icon: Shield, color: 'orange', desc: '🚀 Production • 🔐 Conformité' }
+                                 ].map(({ key, label, icon: Icon, color, desc }) => (
+                                    <button
+                                       key={key}
+                                       onClick={() => setScanMode(key)}
+                                       className={`relative p-3 rounded-lg border transition-all text-left ${scanMode === key
+                                          ? `border-${color}-500 bg-${color}-500/10`
+                                          : theme === 'dark'
+                                             ? 'border-slate-800 bg-slate-950 hover:border-slate-600'
+                                             : 'border-slate-300 bg-slate-100 hover:border-slate-400'
+                                          }`}
+                                    >
+                                       <div className="flex items-center gap-2 mb-1">
+                                          <Icon className={`w-5 h-5 ${scanMode === key ? `text-${color}-400` : 'text-slate-400'}`} />
+                                          <h3 className="font-semibold text-sm">{label}</h3>
+                                       </div>
+                                       <div className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>{desc}</div>
+                                    </button>
+                                 ))}
                               </div>
                            </div>
                         </div>
@@ -555,20 +512,13 @@ export default function App() {
                                  <input
                                     type="text"
                                     value={ollamaUrl}
-                                    onChange={(e) => { setOllamaUrl(e.target.value); setOllamaUrlError(''); setOllamaTestResult(null); }}
+                                    onChange={(e) => { setOllamaUrl(e.target.value); setOllamaTestResult(null); }}
                                     placeholder="192.168.1.50:11434 ou http://..."
-                                    className={`w-full border rounded-lg py-2 px-3 focus:outline-none focus:ring-1 transition-all font-mono text-sm ${ollamaUrlError
-                                       ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
-                                       : theme === 'dark'
-                                          ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500 focus:ring-indigo-500'
-                                          : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400 focus:ring-indigo-400'
+                                    className={`w-full border rounded-lg py-2 px-3 focus:outline-none focus:ring-1 transition-all font-mono text-sm ${theme === 'dark'
+                                       ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500 focus:ring-indigo-500'
+                                       : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400 focus:ring-indigo-400'
                                        }`}
                                  />
-                                 {ollamaUrlError && (
-                                    <p className="text-red-500 text-xs flex items-center gap-1">
-                                       <AlertTriangle className="w-3 h-3" /> {ollamaUrlError}
-                                    </p>
-                                 )}
                                  <button
                                     onClick={testOllamaConnection}
                                     disabled={ollamaTesting || !ollamaUrl.trim()}

@@ -6,6 +6,7 @@ import {
    TrendingUp, Wrench, BookOpen, GitCompare, Sparkles, AlertOctagon, Copy
 } from 'lucide-react';
 import { useToasts } from './components/Toast.jsx';
+import ExecutiveView from './components/ExecutiveView.jsx';
 
 const API_URL = "/api";
 
@@ -63,6 +64,7 @@ export default function App() {
    const [selectedVulnId, setSelectedVulnId] = useState(null);
    const [resultsFilter, setResultsFilter] = useState('ALL');
    const [resultsSearch, setResultsSearch] = useState('');
+   const [resultsViewMode, setResultsViewMode] = useState('technical'); // 'executive' | 'technical'
 
    // Legacy states (kept for compatibility)
    const [searchQuery, setSearchQuery] = useState("");
@@ -799,7 +801,34 @@ export default function App() {
                            {status.vulnerabilities.length} vulnérabilités détectées sur la cible.
                         </p>
                      </div>
-                     <div className="flex gap-3">
+                     <div className="flex items-center gap-3">
+                        {/* Executive/Technical Toggle */}
+                        <div className={`flex items-center gap-1 p-1 rounded-lg border ${theme === 'dark'
+                           ? 'bg-slate-900 border-slate-700'
+                           : 'bg-slate-100 border-slate-300'
+                           }`}>
+                           <button
+                              onClick={() => setResultsViewMode('executive')}
+                              className={`px-3 py-1.5 text-xs font-medium rounded transition-all ${resultsViewMode === 'executive'
+                                 ? 'bg-indigo-600 text-white shadow-sm'
+                                 : theme === 'dark' ? 'text-slate-400 hover:text-slate-300' : 'text-slate-600 hover:text-slate-700'
+                                 }`}
+                           >
+                              <TrendingUp className="w-3 h-3 inline mr-1" />
+                              Executive
+                           </button>
+                           <button
+                              onClick={() => setResultsViewMode('technical')}
+                              className={`px-3 py-1.5 text-xs font-medium rounded transition-all ${resultsViewMode === 'technical'
+                                 ? 'bg-indigo-600 text-white shadow-sm'
+                                 : theme === 'dark' ? 'text-slate-400 hover:text-slate-300' : 'text-slate-600 hover:text-slate-700'
+                                 }`}
+                           >
+                              <Code className="w-3 h-3 inline mr-1" />
+                              Technical
+                           </button>
+                        </div>
+
                         <button
                            onClick={() => setShowLogs(true)}
                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm border transition-colors ${theme === 'dark'
@@ -837,196 +866,204 @@ export default function App() {
                         )}
                      </div>
                   ) : (
-                     <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
-                        {/* LISTE GAUCHE */}
-                        <div className={`col-span-4 flex flex-col overflow-hidden rounded-xl border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                           <div className={`p-4 border-b flex gap-2 overflow-x-auto no-scrollbar ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-                              <button
-                                 onClick={() => setResultsFilter('ALL')}
-                                 className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-                              >
-                                 ALL
-                              </button>
-                              {['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(sev => (
+                     resultsViewMode === 'executive' ? (
+                        <ExecutiveView
+                           vulnerabilities={status.vulnerabilities}
+                           stats={status.stats}
+                           theme={theme}
+                        />
+                     ) : (
+                        <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
+                           {/* LISTE GAUCHE - TECHNICAL VIEW */}
+                           <div className={`col-span-4 flex flex-col overflow-hidden rounded-xl border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                              <div className={`p-4 border-b flex gap-2 overflow-x-auto no-scrollbar ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
                                  <button
-                                    key={sev}
-                                    onClick={() => setResultsFilter(sev)}
-                                    className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === sev ? SEVERITY_STYLES[sev].badge : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                                    onClick={() => setResultsFilter('ALL')}
+                                    className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                                  >
-                                    {sev}
+                                    ALL
                                  </button>
-                              ))}
-                           </div>
-
-                           {/* Search bar */}
-                           <div className={`p-3 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-                              <div className="relative">
-                                 <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                                 <input
-                                    type="text"
-                                    value={resultsSearch}
-                                    onChange={(e) => setResultsSearch(e.target.value)}
-                                    placeholder="Rechercher..."
-                                    className={`w-full pl-9 pr-3 py-2 text-sm rounded-lg border ${theme === 'dark'
-                                       ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500'
-                                       : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400'
-                                       } focus:outline-none focus:ring-1`}
-                                 />
-                              </div>
-                           </div>
-
-                           <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
-                              {searchedFindings.length === 0 && (
-                                 <div className="text-center p-8 text-slate-500 text-sm">Aucun résultat pour ce filtre.</div>
-                              )}
-                              {searchedFindings.map(f => {
-                                 const severity = normalizeSeverity(f.severity);
-                                 const SevIcon = SEVERITY_STYLES[severity].icon;
-                                 return (
-                                    <div
-                                       key={f.id}
-                                       onClick={() => setSelectedVulnId(f.id)}
-                                       className={`p-4 rounded-lg cursor-pointer border transition-all hover:bg-slate-50 dark:hover:bg-slate-800/50 ${selectedVulnId === f.id
-                                          ? 'bg-indigo-50 dark:bg-slate-800 border-indigo-500 dark:border-indigo-500'
-                                          : 'bg-transparent border-transparent'
-                                          }`}
-                                    >
-                                       <div className="flex justify-between items-start mb-2">
-                                          <div className={`text-[10px] font-bold px-2 py-0.5 rounded border ${SEVERITY_STYLES[severity].badge} flex items-center gap-1`}>
-                                             <SevIcon size={10} />
-                                             {f.severity}
-                                          </div>
-                                          <span className="text-slate-400 text-xs font-mono">#{f.id}</span>
-                                       </div>
-                                       <h4 className={`font-semibold text-sm line-clamp-1 ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>{f.title}</h4>
-                                       <div className="text-xs text-slate-500 mt-1 truncate">{f.file || f.filepath}</div>
-                                    </div>
-                                 );
-                              })}
-                           </div>
-                        </div>
-
-                        {/* DETAIL DROITE */}
-                        <div className={`col-span-8 flex flex-col overflow-hidden rounded-xl ${theme === 'dark' ? 'bg-[#0B1120]' : 'bg-slate-50'}`}>
-                           {selectedFinding ? (
-                              <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                                 <div className="flex items-start gap-4 mb-6">
-                                    {React.createElement(SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].icon, {
-                                       size: 32,
-                                       className: `p-3 rounded-xl border ${SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].badge} bg-opacity-10`
-                                    })}
-                                    <div className="flex-1">
-                                       <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>{selectedFinding.title}</h2>
-                                       <div className={`flex items-center gap-4 mt-2 text-sm font-mono ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
-                                          <span className="flex items-center gap-1"><FileText size={14} /> {selectedFinding.file || selectedFinding.filepath}</span>
-                                          {(selectedFinding.line || selectedFinding.line_start) && (
-                                             <>
-                                                <span>:</span>
-                                                <span className="flex items-center gap-1">
-                                                   Ligne{selectedFinding.line_end ? 's' : ''} {selectedFinding.line || selectedFinding.line_start}
-                                                   {selectedFinding.line_end && `–${selectedFinding.line_end}`}
-                                                </span>
-                                             </>
-                                          )}
-                                          {selectedFinding.confidence && (
-                                             <>
-                                                <span>•</span>
-                                                <span className={selectedFinding.confidence >= 70 ? 'text-emerald-400' : selectedFinding.confidence >= 40 ? 'text-yellow-400' : 'text-red-400'}>
-                                                   {selectedFinding.confidence}% confiance
-                                                </span>
-                                             </>
-                                          )}
-                                       </div>
-                                    </div>
+                                 {['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(sev => (
                                     <button
-                                       onClick={() => copyJSON(selectedFinding)}
-                                       className={`p-2 rounded-lg border transition-colors ${theme === 'dark'
-                                          ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400'
-                                          : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-600'
-                                          }`}
-                                       title="Copier JSON"
+                                       key={sev}
+                                       onClick={() => setResultsFilter(sev)}
+                                       className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === sev ? SEVERITY_STYLES[sev].badge : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                                     >
-                                       <Copy size={16} />
+                                       {sev}
                                     </button>
-                                 </div>
+                                 ))}
+                              </div>
 
-                                 <div className="space-y-8">
-                                    {/* V3.1: Manual Review Note / Evidence Missing */}
-                                    {(selectedFinding.note || selectedFinding.needs_manual_review) && (
-                                       <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 flex items-start gap-3">
-                                          <AlertTriangle className="text-yellow-500 shrink-0 mt-0.5" size={18} />
-                                          <div>
-                                             <h3 className="text-yellow-500 font-bold text-sm mb-1">Attention requise</h3>
-                                             <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-                                                {selectedFinding.note || "Examen manuel requis (Preuve manquante)"}
-                                             </p>
+                              {/* Search bar */}
+                              <div className={`p-3 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+                                 <div className="relative">
+                                    <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                                    <input
+                                       type="text"
+                                       value={resultsSearch}
+                                       onChange={(e) => setResultsSearch(e.target.value)}
+                                       placeholder="Rechercher..."
+                                       className={`w-full pl-9 pr-3 py-2 text-sm rounded-lg border ${theme === 'dark'
+                                          ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500'
+                                          : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400'
+                                          } focus:outline-none focus:ring-1`}
+                                    />
+                                 </div>
+                              </div>
+
+                              <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+                                 {searchedFindings.length === 0 && (
+                                    <div className="text-center p-8 text-slate-500 text-sm">Aucun résultat pour ce filtre.</div>
+                                 )}
+                                 {searchedFindings.map(f => {
+                                    const severity = normalizeSeverity(f.severity);
+                                    const SevIcon = SEVERITY_STYLES[severity].icon;
+                                    return (
+                                       <div
+                                          key={f.id}
+                                          onClick={() => setSelectedVulnId(f.id)}
+                                          className={`p-4 rounded-lg cursor-pointer border transition-all hover:bg-slate-50 dark:hover:bg-slate-800/50 ${selectedVulnId === f.id
+                                             ? 'bg-indigo-50 dark:bg-slate-800 border-indigo-500 dark:border-indigo-500'
+                                             : 'bg-transparent border-transparent'
+                                             }`}
+                                       >
+                                          <div className="flex justify-between items-start mb-2">
+                                             <div className={`text-[10px] font-bold px-2 py-0.5 rounded border ${SEVERITY_STYLES[severity].badge} flex items-center gap-1`}>
+                                                <SevIcon size={10} />
+                                                {f.severity}
+                                             </div>
+                                             <span className="text-slate-400 text-xs font-mono">#{f.id}</span>
+                                          </div>
+                                          <h4 className={`font-semibold text-sm line-clamp-1 ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>{f.title}</h4>
+                                          <div className="text-xs text-slate-500 mt-1 truncate">{f.file || f.filepath}</div>
+                                       </div>
+                                    );
+                                 })}
+                              </div>
+                           </div>
+
+                           {/* DETAIL DROITE */}
+                           <div className={`col-span-8 flex flex-col overflow-hidden rounded-xl ${theme === 'dark' ? 'bg-[#0B1120]' : 'bg-slate-50'}`}>
+                              {selectedFinding ? (
+                                 <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+                                    <div className="flex items-start gap-4 mb-6">
+                                       {React.createElement(SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].icon, {
+                                          size: 32,
+                                          className: `p-3 rounded-xl border ${SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].badge} bg-opacity-10`
+                                       })}
+                                       <div className="flex-1">
+                                          <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>{selectedFinding.title}</h2>
+                                          <div className={`flex items-center gap-4 mt-2 text-sm font-mono ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
+                                             <span className="flex items-center gap-1"><FileText size={14} /> {selectedFinding.file || selectedFinding.filepath}</span>
+                                             {(selectedFinding.line || selectedFinding.line_start) && (
+                                                <>
+                                                   <span>:</span>
+                                                   <span className="flex items-center gap-1">
+                                                      Ligne{selectedFinding.line_end ? 's' : ''} {selectedFinding.line || selectedFinding.line_start}
+                                                      {selectedFinding.line_end && `–${selectedFinding.line_end}`}
+                                                   </span>
+                                                </>
+                                             )}
+                                             {selectedFinding.confidence && (
+                                                <>
+                                                   <span>•</span>
+                                                   <span className={selectedFinding.confidence >= 70 ? 'text-emerald-400' : selectedFinding.confidence >= 40 ? 'text-yellow-400' : 'text-red-400'}>
+                                                      {selectedFinding.confidence}% confiance
+                                                   </span>
+                                                </>
+                                             )}
                                           </div>
                                        </div>
-                                    )}
-                                    {/* Description */}
-                                    <div>
-                                       <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Analyse Technique</h3>
-                                       <p className={`text-sm leading-relaxed p-4 rounded-lg border ${theme === 'dark'
-                                          ? 'bg-slate-900 border-slate-800 text-slate-300'
-                                          : 'bg-white border-slate-200 text-slate-700'
-                                          }`}>
-                                          {selectedFinding.description}
-                                          {(selectedFinding.impact && selectedFinding.impact !== "Non évalué") && (
-                                             <span className="block mt-3 pt-3 border-t border-slate-700 text-xs">
-                                                <strong>Impact:</strong> {selectedFinding.impact}
-                                             </span>
-                                          )}
-                                       </p>
+                                       <button
+                                          onClick={() => copyJSON(selectedFinding)}
+                                          className={`p-2 rounded-lg border transition-colors ${theme === 'dark'
+                                             ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400'
+                                             : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-600'
+                                             }`}
+                                          title="Copier JSON"
+                                       >
+                                          <Copy size={16} />
+                                       </button>
                                     </div>
 
-                                    {/* Code Snippet */}
-                                    {selectedFinding.snippet && selectedFinding.snippet !== "Code non disponible" && (
-                                       <div>
-                                          <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Evidence (Code Source)</h3>
-                                          <div className="bg-[#1e1e1e] rounded-lg border border-slate-800 overflow-hidden font-mono text-sm shadow-inner">
-                                             <div className="flex items-center justify-between px-4 py-2 bg-[#252526] border-b border-slate-800 text-xs text-slate-400">
-                                                <span>{selectedFinding.file || selectedFinding.filepath}</span>
-                                                <span>RO mode</span>
+                                    <div className="space-y-8">
+                                       {/* V3.1: Manual Review Note / Evidence Missing */}
+                                       {(selectedFinding.note || selectedFinding.needs_manual_review) && (
+                                          <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 flex items-start gap-3">
+                                             <AlertTriangle className="text-yellow-500 shrink-0 mt-0.5" size={18} />
+                                             <div>
+                                                <h3 className="text-yellow-500 font-bold text-sm mb-1">Attention requise</h3>
+                                                <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
+                                                   {selectedFinding.note || "Examen manuel requis (Preuve manquante)"}
+                                                </p>
                                              </div>
-                                             <pre className="p-4 overflow-x-auto text-slate-300">
-                                                <code>{selectedFinding.snippet}</code>
-                                             </pre>
                                           </div>
-                                       </div>
-                                    )}
-
-                                    {/* Remediation */}
-                                    {selectedFinding.fix && (
-                                       <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-6">
-                                          <h3 className="text-emerald-500 font-bold flex items-center gap-2 mb-2">
-                                             <Wrench size={18} /> Recommandation
-                                          </h3>
-                                          <p className={`text-sm mb-4 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-                                             {selectedFinding.fix}
+                                       )}
+                                       {/* Description */}
+                                       <div>
+                                          <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Analyse Technique</h3>
+                                          <p className={`text-sm leading-relaxed p-4 rounded-lg border ${theme === 'dark'
+                                             ? 'bg-slate-900 border-slate-800 text-slate-300'
+                                             : 'bg-white border-slate-200 text-slate-700'
+                                             }`}>
+                                             {selectedFinding.description}
+                                             {(selectedFinding.impact && selectedFinding.impact !== "Non évalué") && (
+                                                <span className="block mt-3 pt-3 border-t border-slate-700 text-xs">
+                                                   <strong>Impact:</strong> {selectedFinding.impact}
+                                                </span>
+                                             )}
                                           </p>
-                                          <div className="flex gap-3">
-                                             <button
-                                                onClick={() => generateFix(selectedFinding.id)}
-                                                disabled={autoFixLoading === selectedFinding.id || !((selectedFinding.file || selectedFinding.filepath) && (selectedFinding.line || selectedFinding.line_start) && selectedFinding.fix && selectedFinding.fix !== "Pas de correctif proposé.")}
-                                                className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-1.5 px-4 h-8 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                             >
-                                                {autoFixLoading === selectedFinding.id ? '⏳ Génération...' : '🔧 Générer correctif'}
-                                             </button>
-                                          </div>
                                        </div>
-                                    )}
+
+                                       {/* Code Snippet */}
+                                       {selectedFinding.snippet && selectedFinding.snippet !== "Code non disponible" && (
+                                          <div>
+                                             <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Evidence (Code Source)</h3>
+                                             <div className="bg-[#1e1e1e] rounded-lg border border-slate-800 overflow-hidden font-mono text-sm shadow-inner">
+                                                <div className="flex items-center justify-between px-4 py-2 bg-[#252526] border-b border-slate-800 text-xs text-slate-400">
+                                                   <span>{selectedFinding.file || selectedFinding.filepath}</span>
+                                                   <span>RO mode</span>
+                                                </div>
+                                                <pre className="p-4 overflow-x-auto text-slate-300">
+                                                   <code>{selectedFinding.snippet}</code>
+                                                </pre>
+                                             </div>
+                                          </div>
+                                       )}
+
+                                       {/* Remediation */}
+                                       {selectedFinding.fix && (
+                                          <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-6">
+                                             <h3 className="text-emerald-500 font-bold flex items-center gap-2 mb-2">
+                                                <Wrench size={18} /> Recommandation
+                                             </h3>
+                                             <p className={`text-sm mb-4 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
+                                                {selectedFinding.fix}
+                                             </p>
+                                             <div className="flex gap-3">
+                                                <button
+                                                   onClick={() => generateFix(selectedFinding.id)}
+                                                   disabled={autoFixLoading === selectedFinding.id || !((selectedFinding.file || selectedFinding.filepath) && (selectedFinding.line || selectedFinding.line_start) && selectedFinding.fix && selectedFinding.fix !== "Pas de correctif proposé.")}
+                                                   className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-1.5 px-4 h-8 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                   {autoFixLoading === selectedFinding.id ? '⏳ Génération...' : '🔧 Générer correctif'}
+                                                </button>
+                                             </div>
+                                          </div>
+                                       )}
+                                    </div>
                                  </div>
-                              </div>
-                           ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                                 <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'}`}>
-                                    <Search size={24} />
+                              ) : (
+                                 <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                                    <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                                       <Search size={24} />
+                                    </div>
+                                    <p>Sélectionnez une vulnérabilité pour voir les détails.</p>
                                  </div>
-                                 <p>Sélectionnez une vulnérabilité pour voir les détails.</p>
-                              </div>
-                           )}
+                              )}
+                           </div>
                         </div>
-                     </div>
+                     )
                   )}
                </div>
             )}

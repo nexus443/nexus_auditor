@@ -85,10 +85,37 @@ export default function App() {
    const [targetError, setTargetError] = useState('');
    const [ollamaUrlError, setOllamaUrlError] = useState('');
 
+   // Service health
+   const [serviceHealth, setServiceHealth] = useState({
+      api: 'unknown', // 'online' | 'offline' | 'unknown'
+      ollama: 'unknown',
+      lastCheck: null
+   });
+
    useEffect(() => {
       localStorage.setItem('theme', theme);
       document.documentElement.setAttribute('data-theme', theme);
    }, [theme]);
+
+   // Check service health on mount and periodically
+   useEffect(() => {
+      const checkHealth = async () => {
+         try {
+            const res = await fetch(`${API_URL}/scan/status`, { signal: AbortSignal.timeout(3000) });
+            if (res.ok) {
+               setServiceHealth(prev => ({ ...prev, api: 'online', lastCheck: Date.now() }));
+            } else {
+               setServiceHealth(prev => ({ ...prev, api: 'offline', lastCheck: Date.now() }));
+            }
+         } catch (e) {
+            setServiceHealth(prev => ({ ...prev, api: 'offline', lastCheck: Date.now() }));
+         }
+      };
+
+      checkHealth();
+      const interval = setInterval(checkHealth, 30000); // Every 30s
+      return () => clearInterval(interval);
+   }, []);
 
    useEffect(() => {
       let interval;
@@ -377,6 +404,19 @@ export default function App() {
                </div>
 
                <div className="flex items-center gap-4">
+                  {/* Service Health Indicator */}
+                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border ${serviceHealth.api === 'online'
+                     ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500'
+                     : serviceHealth.api === 'offline'
+                        ? 'bg-red-500/10 border-red-500/20 text-red-500'
+                        : 'bg-slate-500/10 border-slate-500/20 text-slate-500'
+                     }`}>
+                     <div className={`w-2 h-2 rounded-full ${serviceHealth.api === 'online' ? 'bg-emerald-500 animate-pulse' :
+                        serviceHealth.api === 'offline' ? 'bg-red-500' : 'bg-slate-500'
+                        }`} />
+                     <span>API {serviceHealth.api === 'online' ? 'Online' : serviceHealth.api === 'offline' ? 'Offline' : 'Unknown'}</span>
+                  </div>
+
                   <button
                      onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
                      className={`p-2 rounded-lg transition-all ${theme === 'dark'
@@ -602,6 +642,32 @@ export default function App() {
                                  Détection automatique (localhost:11434 ou Docker)
                               </div>
                            )}
+                        </div>
+
+                        {/* Pipeline Overview - What Nexus Will Do */}
+                        <div className={`mt-6 p-4 rounded-xl border ${theme === 'dark'
+                           ? 'bg-slate-800/50 border-slate-700'
+                           : 'bg-slate-50 border-slate-200'
+                           }`}>
+                           <div className="flex items-center gap-2 mb-3">
+                              <Layers className="w-4 h-4 text-indigo-400" />
+                              <h3 className="text-sm font-semibold">Ce que Nexus va faire</h3>
+                           </div>
+                           <div className="grid grid-cols-5 gap-2">
+                              {[
+                                 { label: 'Normalize', icon: '📋', desc: 'Code parsing' },
+                                 { label: 'Index', icon: '🔍', desc: 'File mapping' },
+                                 { label: 'Analyze', icon: '🧠', desc: 'AI scanning' },
+                                 { label: 'Correlate', icon: '🔗', desc: 'Pattern matching' },
+                                 { label: 'Report', icon: '📊', desc: 'Results' }
+                              ].map((stage, i) => (
+                                 <div key={i} className="text-center">
+                                    <div className={`text-lg mb-1 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>{stage.icon}</div>
+                                    <div className="text-xs font-medium mb-0.5">{stage.label}</div>
+                                    <div className={`text-[10px] ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>{stage.desc}</div>
+                                 </div>
+                              ))}
+                           </div>
                         </div>
 
                         <div className={`pt-4 flex items-center justify-between border-t ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'

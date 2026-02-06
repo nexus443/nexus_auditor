@@ -10,7 +10,7 @@ import uuid
 import difflib
 import signal
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +32,162 @@ PATCHES_DIR = "./audit_logs/patches"
 
 os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
 os.makedirs(PATCHES_DIR, exist_ok=True)
+
+JSON_LOGS_ENABLED = os.getenv("NEXUS_JSON_LOGS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def init_scan_telemetry() -> dict:
+    """Structure de télémétrie minimale (baseline instrumentation)."""
+    return {
+        "stage_timings_ms": {},
+        "llm_requests": 0,
+        "llm_success": 0,
+        "llm_errors": 0,
+        "llm_latency_ms": {"count": 0, "avg": 0.0, "min": None, "max": 0.0, "last": 0.0},
+        "files_discovered": 0,
+        "files_scheduled": 0,
+        "files_processed": 0,
+        "chunks_total": 0,
+        "chunks_processed": 0,
+        "tokens_estimated_total": 0,
+        "chunks_by_file": {},
+        "tokens_estimated_by_file": {},
+    }
+
+
+def estimate_tokens_from_text(text: str) -> int:
+    """
+    Estimation légère de tokens:
+    - on utilise la taille UTF-8 / 4 pour obtenir un ordre de grandeur stable.
+    """
+    if not text:
+        return 0
+    return max(1, int(len(text.encode("utf-8", errors="ignore")) / 4))
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Masque les secrets évidents avant logs structurés."""
+    if not isinstance(value, str):
+        return value
+
+    redacted = value
+
+    # Credentials in URLs: scheme://user:pass@host -> scheme://***:***@host
+    redacted = re.sub(
+        r'([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]+):([^@\s/]+)@',
+        r'\1***:***@',
+        redacted
+    )
+
+    # Query params secrets: ?token=...&api_key=...
+    redacted = re.sub(
+        r'([?&](?:token|api[_-]?key|key|password|secret)=)([^&\s]+)',
+        r'\1***',
+        redacted,
+        flags=re.IGNORECASE
+    )
+
+    # Bearer tokens
+    redacted = re.sub(
+        r'(?i)\b(bearer\s+)[A-Za-z0-9._\-~+/=]+',
+        r'\1***',
+        redacted
+    )
+
+    # Generic key=value forms
+    redacted = re.sub(
+        r'(?i)\b(api[_-]?key|token|password|passwd|secret)\s*[:=]\s*([^\s,;]+)',
+        r'\1=***',
+        redacted
+    )
+
+    # OpenAI-like keys
+    redacted = re.sub(r'\bsk-[A-Za-z0-9]{10,}\b', '***', redacted)
+
+    return redacted
+
+
+def sanitize_for_log(value: Any) -> Any:
+    """Sanitize recursively log payload values."""
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_log(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_for_log(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_for_log(v) for v in value)
+    return value
+
+
+def start_scan_stage(stage_name: str) -> float:
+    scan_state["current_stage"] = stage_name
+    add_log(f"▶ Stage {stage_name}", "info", stage=stage_name, event="stage_start")
+    return time.time()
+
+
+def end_scan_stage(stage_name: str, started_at: Optional[float]):
+    if started_at is None:
+        return
+    elapsed_ms = round((time.time() - started_at) * 1000, 2)
+    telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
+    stage_timings = telemetry.setdefault("stage_timings_ms", {})
+    stage_timings[stage_name] = round(stage_timings.get(stage_name, 0.0) + elapsed_ms, 2)
+    add_log(
+        f"✅ Stage {stage_name} terminé ({elapsed_ms:.0f}ms)",
+        "info",
+        stage=stage_name,
+        event="stage_end",
+        duration_ms=elapsed_ms,
+    )
+
+
+def switch_scan_stage(current_stage: Optional[str], started_at: Optional[float], next_stage: str) -> Tuple[str, float]:
+    if current_stage:
+        end_scan_stage(current_stage, started_at)
+    return next_stage, start_scan_stage(next_stage)
+
+
+def record_llm_call_metrics(
+    filename: str,
+    latency_ms: float,
+    success: bool,
+    attempt: int,
+    chunk_index: Optional[int] = None,
+    chunk_total: Optional[int] = None,
+    status_code: Optional[int] = None,
+    error: Optional[str] = None
+):
+    telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
+
+    telemetry["llm_requests"] += 1
+    if success:
+        telemetry["llm_success"] += 1
+    else:
+        telemetry["llm_errors"] += 1
+
+    latency = telemetry.setdefault("llm_latency_ms", {"count": 0, "avg": 0.0, "min": None, "max": 0.0, "last": 0.0})
+    latency["count"] += 1
+    latency["last"] = round(latency_ms, 2)
+    latency["max"] = round(max(latency.get("max", 0.0), latency_ms), 2)
+    latency["min"] = round(latency_ms, 2) if latency.get("min") is None else round(min(latency["min"], latency_ms), 2)
+    prev_avg = float(latency.get("avg", 0.0))
+    latency["avg"] = round(prev_avg + ((latency_ms - prev_avg) / max(1, latency["count"])), 2)
+
+    add_log(
+        f"⏱️ LLM {filename}: {latency_ms:.0f}ms",
+        "info" if success else "warning",
+        stage="analyze",
+        event="llm_request",
+        filename=filename,
+        latency_ms=round(latency_ms, 2),
+        attempt=attempt,
+        chunk_index=chunk_index,
+        chunk_total=chunk_total,
+        status_code=status_code,
+        success=success,
+        error=error,
+    )
 
 # ==========================================
 # 🔗 OLLAMA CONNECTION MANAGEMENT
@@ -360,6 +516,7 @@ scan_state = {
     "id": None,
     "is_scanning": False,
     "start_time": None,
+    "current_stage": "idle",
     "progress": 0,
     "current_file": "",
     "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
@@ -373,7 +530,8 @@ scan_state = {
     "target_dir": None,
     "profile": None,
     "mode": None,
-    "budget_info": {}
+    "budget_info": {},
+    "telemetry": init_scan_telemetry()
 }
 
 class ScanRequest(BaseModel):
@@ -391,12 +549,30 @@ class FixRequest(BaseModel):
 # 🛠️ UTILITAIRES
 # ==========================================
 
-def add_log(msg, type="info"):
+def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] = None, **fields):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [{type.upper()}] {msg}")
+    safe_msg = redact_sensitive_text(str(msg))
+    current_stage = stage or scan_state.get("current_stage") or "unknown"
+
+    structured_payload = {
+        "timestamp": datetime.now().isoformat(),
+        "level": str(type).lower(),
+        "message": safe_msg,
+        "stage": current_stage,
+        "event": event or "log",
+        "scan_id": scan_state.get("id"),
+    }
+    if fields:
+        structured_payload["meta"] = sanitize_for_log(fields)
+
+    if JSON_LOGS_ENABLED:
+        print(json.dumps(structured_payload, ensure_ascii=False))
+    else:
+        print(f"[{ts}] [{type.upper()}] [{current_stage}] {safe_msg}")
+
     if len(scan_state["logs"]) > 500: 
         scan_state["logs"].pop(0)
-    scan_state["logs"].append({"msg": msg, "type": type, "time": ts})
+    scan_state["logs"].append({"msg": safe_msg, "type": type, "time": ts, "stage": current_stage, "event": event or "log"})
 
 def save_to_history(summary):
     history = []
@@ -977,7 +1153,14 @@ class StableEngine:
         self.fallback_model = "qwen2.5-coder:7b"  # V2.5: Fallback cohérent
         self.ollama_base_url = ollama_base_url or OLLAMA_BASE_URL  # Custom ou défaut
 
-    def call_ollama(self, prompt: str, filename: str, max_retries=2) -> Optional[dict]:
+    def call_ollama(
+        self,
+        prompt: str,
+        filename: str,
+        max_retries=2,
+        chunk_index: Optional[int] = None,
+        chunk_total: Optional[int] = None
+    ) -> Optional[dict]:
         """Appel IA simple avec retry et fallback"""
         timeout = self.profile.get("timeout", 180)
         model = self.profile["model"]
@@ -986,12 +1169,26 @@ class StableEngine:
         num_predict = self.mode.get("num_predict_override") or self.profile["num_predict"]
         
         for attempt in range(max_retries):
+            request_start = time.time()
+            request_success = False
+            status_code = None
+            error_reason = None
             try:
                 if attempt > 0:
                     add_log(f"🔄 Retry {attempt+1}/{max_retries} pour {filename}", "warning")
                     time.sleep(2 ** attempt)
                 
-                add_log(f"🤖 Analyse: {filename} (modèle: {model})", "info")
+                chunk_label = f" chunk {chunk_index}/{chunk_total}" if chunk_index and chunk_total else ""
+                add_log(
+                    f"🤖 Analyse: {filename}{chunk_label} (modèle: {model})",
+                    "info",
+                    stage="analyze",
+                    event="llm_dispatch",
+                    filename=filename,
+                    chunk_index=chunk_index,
+                    chunk_total=chunk_total,
+                    model=model,
+                )
                 
                 response = requests.post(
                     f"{self.ollama_base_url}/api/generate",  # V2.5: URL dynamique selon mode
@@ -1008,6 +1205,7 @@ class StableEngine:
                     },
                     timeout=timeout
                 )
+                status_code = response.status_code
                 
                 if response.status_code == 200:
                     raw_text = response.json().get('response', '{}')
@@ -1016,18 +1214,35 @@ class StableEngine:
                     parsed = extract_json_from_text(raw_text)
                     
                     if parsed is not None:
+                        request_success = True
                         add_log(f"✅ Réponse valide pour {filename}", "success")
                         return {"data": parsed, "raw": raw_text}
                     else:
+                        error_reason = "invalid_json"
                         add_log(f"⚠️ JSON invalide pour {filename}", "warning")
                         continue
                 else:
+                    error_reason = f"http_{response.status_code}"
                     add_log(f"❌ HTTP {response.status_code} pour {filename}", "error")
                     
             except requests.exceptions.Timeout:
+                error_reason = "timeout"
                 add_log(f"⏱️ Timeout ({timeout}s) pour {filename}", "warning")
             except Exception as e:
+                error_reason = type(e).__name__
                 add_log(f"❌ Erreur: {str(e)[:100]}", "error")
+            finally:
+                latency_ms = round((time.time() - request_start) * 1000, 2)
+                record_llm_call_metrics(
+                    filename=filename,
+                    latency_ms=latency_ms,
+                    success=request_success,
+                    attempt=attempt + 1,
+                    chunk_index=chunk_index,
+                    chunk_total=chunk_total,
+                    status_code=status_code,
+                    error=error_reason,
+                )
         
         # ECO RULE #1: Pas de fallback retry - 1 fichier = 1 appel
         return None
@@ -1078,6 +1293,23 @@ class StableEngine:
             
             scan_state["current_file"] = filename
             all_vulns = []
+
+            telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
+            chunk_token_estimates = [estimate_tokens_from_text(chunk) for chunk in chunks]
+            total_chunk_tokens = sum(chunk_token_estimates)
+            telemetry["chunks_total"] += len(chunks)
+            telemetry["chunks_by_file"][filename] = len(chunks)
+            telemetry["tokens_estimated_by_file"][filename] = total_chunk_tokens
+            telemetry["tokens_estimated_total"] += total_chunk_tokens
+            add_log(
+                f"📦 {filename}: {len(chunks)} chunk(s), ~{total_chunk_tokens} tokens estimés",
+                "info",
+                stage="analyze",
+                event="chunk_plan",
+                filename=filename,
+                chunks=len(chunks),
+                tokens_estimated=total_chunk_tokens,
+            )
             
             file_start_global = time.time()
             max_time = self.mode.get("max_time_per_file", 60)
@@ -1093,10 +1325,29 @@ class StableEngine:
                     add_log(f"⏱️ Timeout fichier atteint ({max_time}s) - Arrêt analyse {filename}", "warning")
                     break
 
+                chunk_tokens = chunk_token_estimates[i] if i < len(chunk_token_estimates) else estimate_tokens_from_text(chunk)
+                telemetry["chunks_processed"] += 1
+                add_log(
+                    f"🔎 Chunk {i+1}/{len(chunks)} (~{chunk_tokens} tokens) pour {filename}",
+                    "info",
+                    stage="analyze",
+                    event="chunk_start",
+                    filename=filename,
+                    chunk_index=i + 1,
+                    chunk_total=len(chunks),
+                    chunk_tokens_estimated=chunk_tokens,
+                )
+
                 prompt = CORE_PROMPT.format(filename=f"{filename} (part {i+1}/{len(chunks)})", content=chunk)
                 
                 # Call Ollama
-                result = self.call_ollama(prompt, filename, max_retries=1)
+                result = self.call_ollama(
+                    prompt,
+                    filename,
+                    max_retries=1,
+                    chunk_index=i + 1,
+                    chunk_total=len(chunks),
+                )
                 
                 if result:
                     data = result["data"]
@@ -1152,32 +1403,29 @@ class StableEngine:
 def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "auto", ollama_url: Optional[str] = None):
     """Orchestration principale du scan"""
     scan_id = str(uuid.uuid4())[:8]
-    
-    # V3.0: Début du scan
-    
+
+    current_stage = None
+    stage_started_at = None
+
     # V2.5: Déterminer l'URL Ollama à utiliser
     try:
         base_url = get_ollama_base_url(ollama_mode=ollama_mode, ollama_url=ollama_url)
-        add_log(f"🔗 Ollama: {ollama_mode} mode ({base_url})", "info")
     except ValueError as e:
         add_log(f"❌ Erreur config Ollama: {e}", "error")
         scan_state["is_scanning"] = False
+        scan_state["current_stage"] = "failed"
         return
     
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
-    
-    # V3.0: Logs de configuration
-    add_log(f"�️ Nexus V3.0 Stable - Session #{scan_id}")
-    add_log(f"📊 Profil: {profile['label']} | Mode: {mode['label']}")
-    add_log(f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}")
-    
-    
+
     scan_state.update({
         "id": scan_id,
         "is_scanning": True,
         "start_time": time.time(),
+        "current_stage": "normalize",
         "progress": 0,
+        "current_file": "",
         "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
         "logs": [],
         "vulnerabilities": [],
@@ -1194,17 +1442,50 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             "max_time_per_file": mode["max_time_per_file"],
             "min_severity": mode["min_severity"],
             "min_confidence": mode["min_confidence"]
-        }
+        },
+        "telemetry": init_scan_telemetry()
     })
-    
-    add_log(f"� Initialisation du scan...", "info")
+
+    current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "normalize")
+
+    add_log("Nexus V3.0 Stable - scan session started", "info", stage="normalize", event="scan_start", scan_id=scan_id)
+    add_log(
+        f"🔗 Ollama: {ollama_mode} mode ({base_url})",
+        "info",
+        stage="normalize",
+        event="ollama_endpoint",
+        ollama_mode=ollama_mode,
+        ollama_url=base_url,
+    )
+    add_log(
+        f"📊 Profil: {profile['label']} | Mode: {mode['label']}",
+        "info",
+        stage="normalize",
+        event="scan_profile_mode",
+        profile=profile_key,
+        mode=mode_key,
+    )
+    add_log(
+        f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}",
+        "info",
+        stage="normalize",
+        event="scan_budget",
+        max_files=mode["max_files"],
+        min_severity=mode["min_severity"],
+        min_confidence=mode["min_confidence"],
+    )
+    add_log("Initialisation du scan...", "info", stage="normalize", event="scan_init")
 
     # V2.5: Vérification et installation automatique du modèle
     model_name = profile["model"]
     # V3.4: Logging now done inside ensure_model_available()
     if not ensure_model_available(model_name, base_url):  # V3.0: Passer URL dynamique
         add_log(f"❌ Impossible d'installer le modèle {model_name}. Scan annulé.", "critical")
+        if current_stage:
+            end_scan_stage(current_stage, stage_started_at)
+            current_stage, stage_started_at = None, None
         scan_state["is_scanning"] = False
+        scan_state["current_stage"] = "failed"
         return
 
     tmp_dir = None
@@ -1230,6 +1511,8 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             add_log(f"✅ Clone réussi", "info")
         
         scan_state["target_dir"] = target_dir
+
+        current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "index")
         
         # Collecte des fichiers selon le mode
         files = []
@@ -1250,22 +1533,51 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 
                 if f.endswith(extensions) or (mode_key == "devsecops" and f in ['Dockerfile', 'docker-compose.yml']):
                     files.append(os.path.join(root, f))
+
+        telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
+        discovered_count = len(files)
+        telemetry["files_discovered"] = discovered_count
         
         # Limiter selon le mode
         max_files = mode["max_files"]
-        if max_files and len(files) > max_files:
-            add_log(f"✂️ Limite mode {mode_key}: {len(files)} → {max_files} fichiers", "info")
+        if max_files and discovered_count > max_files:
+            skipped_count = discovered_count - max_files
+            add_log(
+                f"✂️ Limite mode {mode_key}: {discovered_count} → {max_files} fichiers",
+                "info",
+                stage="index",
+                event="file_limit_applied",
+                discovered=discovered_count,
+                scheduled=max_files,
+                skipped=skipped_count,
+            )
             files = files[:max_files]
-            scan_state["stats"]["skipped"] = len(files) - max_files
+            scan_state["stats"]["skipped"] = skipped_count
+        else:
+            scan_state["stats"]["skipped"] = 0
         
         total_files = len(files)
+        telemetry["files_scheduled"] = total_files
         scan_state["stats"]["files"] = total_files
+
+        add_log(
+            f"📂 Index terminé: {total_files} fichier(s) planifié(s)",
+            "info",
+            stage="index",
+            event="index_summary",
+            files_discovered=discovered_count,
+            files_scheduled=total_files,
+        )
         
         if total_files == 0:
             add_log("⚠️ Aucun fichier correspondant aux critères.", "warning")
+            scan_state["progress"] = 100
+            scan_state["estimated_time"] = "Terminé"
+            scan_state["current_stage"] = "completed"
             return
 
-        add_log(f"📁 {total_files} fichiers à analyser", "info")
+        current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "analyze")
+        add_log(f"📁 {total_files} fichiers à analyser", "info", stage="analyze", event="analyze_start", files=total_files)
 
         engine = StableEngine(profile, mode, ollama_base_url=base_url)
         start_ts = time.time()
@@ -1288,6 +1600,16 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             file_start = time.time()
             vulns = engine.scan_file(filepath, filename)
             file_duration = time.time() - file_start
+            telemetry["files_processed"] += 1
+            add_log(
+                f"🧾 Fichier analysé: {filename}",
+                "info",
+                stage="analyze",
+                event="file_analyzed",
+                filename=filename,
+                duration_ms=round(file_duration * 1000, 2),
+                findings=len(vulns),
+            )
             
             max_time = mode["max_time_per_file"]
             if file_duration > max_time:
@@ -1306,6 +1628,8 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                         add_log(f"🚨 {v['severity']}: {v['title']} ({filename})", "error")
 
             scan_state["progress"] = int(((i + 1) / total_files) * 100)
+
+        current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "correlate")
         
         # Calcul score de confiance global
         if scan_state["vulnerabilities"]:
@@ -1320,6 +1644,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             if scan_state['failed_analyses'] > 0:
                 add_log(f"❌ Analyses échouées: {scan_state['failed_analyses']}", "warning")
             
+            current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "report")
             scan_state["progress"] = 100
             scan_state["estimated_time"] = "Terminé"
             
@@ -1333,13 +1658,26 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 "confidence_score": scan_state["confidence_score"],
                 "duration_seconds": int(total_time),
                 "successful_analyses": scan_state["successful_analyses"],
-                "failed_analyses": scan_state["failed_analyses"]
+                "failed_analyses": scan_state["failed_analyses"],
+                "telemetry": {
+                    "stage_timings_ms": scan_state["telemetry"].get("stage_timings_ms", {}),
+                    "llm_requests": scan_state["telemetry"].get("llm_requests", 0),
+                    "chunks_total": scan_state["telemetry"].get("chunks_total", 0),
+                    "tokens_estimated_total": scan_state["telemetry"].get("tokens_estimated_total", 0),
+                }
             }
             save_to_history(summary)
+            scan_state["current_stage"] = "completed"
+        else:
+            scan_state["current_stage"] = "stopped"
 
     except Exception as e:
-        add_log(f"🔥 Erreur Critique: {str(e)}", "critical")
+        add_log(f"🔥 Erreur Critique: {str(e)}", "critical", stage=scan_state.get("current_stage"), event="scan_error")
+        scan_state["current_stage"] = "failed"
     finally:
+        if current_stage:
+            end_scan_stage(current_stage, stage_started_at)
+            current_stage, stage_started_at = None, None
         scan_state["is_scanning"] = False
         # V3.0: Cleanup tmp_dir si clone Git
         if tmp_dir and os.path.exists(tmp_dir):
@@ -1425,6 +1763,7 @@ async def stop_scan():
     """Arrête le scan en cours"""
     scan_state["should_stop"] = True
     scan_state["is_scanning"] = False
+    scan_state["current_stage"] = "stopped"
     add_log("🛑 Arrêt demandé par l'utilisateur", "warning")
     return {"success": True, "message": "Scan stopping..."}
 

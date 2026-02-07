@@ -27,6 +27,11 @@ try:
 except ImportError:
     from llm_budget_controller import LLMBudgetController
 
+try:
+    from .scan_mode_controller import ScanModeController
+except ImportError:
+    from scan_mode_controller import ScanModeController
+
 # ==========================================
 # ⚙️ NEXUS AUDITOR V3.0 STABLE
 # ==========================================
@@ -473,6 +478,7 @@ SCAN_MODES = {
 }
 
 BUDGET_CONTROLLER = LLMBudgetController()
+MODE_CONTROLLER = ScanModeController()
 
 # ==========================================
 # 🚫 FICHIERS BUILD-TIME À IGNORER (Rapid/Deep)
@@ -1404,7 +1410,7 @@ class StableEngine:
         return None
 
 
-    def scan_file(self, filepath: str, filename: str) -> list:
+    def scan_file(self, filepath: str, filename: str, analysis_context: Optional[dict] = None) -> list:
         """
         V3.1 SMART CHUNKING STRATEGY:
         - Si len < ctx: Envoi complet (1 pass).
@@ -1417,6 +1423,14 @@ class StableEngine:
             return []
 
         try:
+            analysis_context = analysis_context or {}
+            mode_key = MODE_CONTROLLER.resolve_mode_key(
+                mode_key=analysis_context.get("mode_key"),
+                mode_config=self.mode,
+            )
+            hotspot_reasons = analysis_context.get("hotspot_reasons", [])
+            cross_file_hints = analysis_context.get("cross_file_hints", [])
+
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
             
@@ -1497,7 +1511,16 @@ class StableEngine:
                     chunk_tokens_estimated=chunk_tokens,
                 )
 
-                prompt = CORE_PROMPT.format(filename=f"{filename} (part {i+1}/{len(chunks)})", content=chunk)
+                prompt = MODE_CONTROLLER.build_analysis_prompt(
+                    mode_key=mode_key,
+                    filename=f"{filename} (part {i+1}/{len(chunks)})",
+                    content=chunk,
+                    language=language,
+                    chunk_index=i + 1,
+                    chunk_total=len(chunks),
+                    hotspot_reasons=hotspot_reasons,
+                    cross_file_hints=cross_file_hints,
+                )
                 
                 # Call Ollama
                 result = self.call_ollama(
@@ -1600,9 +1623,10 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
     
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
+    resolved_mode_key = MODE_CONTROLLER.resolve_mode_key(mode_key=mode_key, mode_config=mode)
     budget_plan = BUDGET_CONTROLLER.compute_plan(
         profile_key=profile_key,
-        mode_key=mode_key,
+        mode_key=resolved_mode_key,
         profile_config=profile,
         mode_config=mode,
         ollama_mode=ollama_mode,
@@ -1653,7 +1677,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         stage="normalize",
         event="scan_profile_mode",
         profile=profile_key,
-        mode=mode_key,
+        mode=resolved_mode_key,
     )
     add_log(
         f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}",
@@ -1672,6 +1696,13 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         stage="normalize",
         event="llm_budget_plan",
         llm_budget_plan=budget_plan,
+    )
+    add_log(
+        f"🧭 Mode strategy: {resolved_mode_key}",
+        "info",
+        stage="normalize",
+        event="mode_strategy",
+        mode_strategy=resolved_mode_key,
     )
     add_log("Initialisation du scan...", "info", stage="normalize", event="scan_init")
 
@@ -1727,15 +1758,18 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 full_path = os.path.join(root, f)
                 
                 # V3.0: Ignorer fichiers build-time en Rapid/Deep
-                if mode_key in ("rapid", "deep") and f in BUILD_TIME_FILES:
+                if resolved_mode_key in ("rapid", "deep") and f in BUILD_TIME_FILES:
                     continue
                 
-                if f.endswith(extensions) or (mode_key == "devsecops" and f in ['Dockerfile', 'docker-compose.yml']):
+                if f.endswith(extensions) or (resolved_mode_key == "devsecops" and f in ['Dockerfile', 'docker-compose.yml']):
                     files.append(os.path.join(root, f))
 
         telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
-        discovered_count = len(files)
+        file_entries = MODE_CONTROLLER.prioritize_files(files, resolved_mode_key)
+        discovered_count = len(file_entries)
         telemetry["files_discovered"] = discovered_count
+        telemetry["mode_strategy"] = resolved_mode_key
+        telemetry["hotspot_files_discovered"] = sum(1 for entry in file_entries if entry.get("score", 0) > 0 and entry.get("reasons"))
         
         # Limiter selon le mode
         max_files = mode["max_files"]
@@ -1750,12 +1784,12 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 scheduled=max_files,
                 skipped=skipped_count,
             )
-            files = files[:max_files]
+            file_entries = file_entries[:max_files]
             scan_state["stats"]["skipped"] = skipped_count
         else:
             scan_state["stats"]["skipped"] = 0
         
-        total_files = len(files)
+        total_files = len(file_entries)
         telemetry["files_scheduled"] = total_files
         scan_state["stats"]["files"] = total_files
 
@@ -1780,8 +1814,9 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
 
         engine = StableEngine(profile, mode, budget_plan=budget_plan, ollama_base_url=base_url)
         start_ts = time.time()
+        cross_file_hints: List[str] = []
         
-        for i, filepath in enumerate(files):
+        for i, file_entry in enumerate(file_entries):
             if scan_state["should_stop"]:
                 add_log("🛑 Scan interrompu par l'utilisateur", "warning")
                 break
@@ -1793,11 +1828,21 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 remain = avg_time * (total_files - i)
                 scan_state["estimated_time"] = f"{int(remain)} sec"
             
+            filepath = file_entry.get("path")
             filename = os.path.basename(filepath)
+            hotspot_reasons = file_entry.get("reasons", [])
             
             # Timeout par fichier selon le mode
             file_start = time.time()
-            vulns = engine.scan_file(filepath, filename)
+            vulns = engine.scan_file(
+                filepath,
+                filename,
+                analysis_context={
+                    "mode_key": resolved_mode_key,
+                    "hotspot_reasons": hotspot_reasons,
+                    "cross_file_hints": cross_file_hints if resolved_mode_key == "deep" else [],
+                },
+            )
             file_duration = time.time() - file_start
             telemetry["files_processed"] += 1
             add_log(
@@ -1808,7 +1853,11 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 filename=filename,
                 duration_ms=round(file_duration * 1000, 2),
                 findings=len(vulns),
+                hotspot_reasons=hotspot_reasons,
             )
+
+            if resolved_mode_key == "deep" and vulns:
+                cross_file_hints = MODE_CONTROLLER.update_cross_file_hints(cross_file_hints, filename, vulns)
             
             max_time = mode["max_time_per_file"]
             if file_duration > max_time:

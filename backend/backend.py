@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import math
 import requests
 import shutil
 import tempfile
@@ -18,9 +19,9 @@ from pydantic import BaseModel, Field
 from git import Repo
 
 try:
-    from .chunker import build_chunk_plan
+    from .chunker import build_chunk_plan, compute_chunk_token_budget, resolve_max_chunks
 except ImportError:
-    from chunker import build_chunk_plan
+    from chunker import build_chunk_plan, compute_chunk_token_budget, resolve_max_chunks
 
 try:
     from .llm_budget_controller import LLMBudgetController
@@ -55,6 +56,48 @@ os.makedirs(PATCHES_DIR, exist_ok=True)
 
 JSON_LOGS_ENABLED = os.getenv("NEXUS_JSON_LOGS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
+PIPELINE_STAGES = ("normalize", "index", "analyze", "correlate", "report")
+
+
+def _pipeline_stage_index(stage_name: str) -> int:
+    try:
+        return PIPELINE_STAGES.index(stage_name) + 1
+    except ValueError:
+        return 0
+
+
+def init_stage_report(current_stage: str = "idle") -> dict:
+    stage_status = {stage: "pending" for stage in PIPELINE_STAGES}
+    completed: List[str] = []
+    current_index = _pipeline_stage_index(current_stage)
+
+    if current_index:
+        for stage in PIPELINE_STAGES[: current_index - 1]:
+            stage_status[stage] = "completed"
+            completed.append(stage)
+        stage_status[current_stage] = "active"
+
+    return {
+        "sequence": list(PIPELINE_STAGES),
+        "current": current_stage,
+        "current_index": current_index,
+        "completed": completed,
+        "stage_status": stage_status,
+        "terminal_state": None,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def mark_stage_terminal_state(terminal_state: str):
+    report = scan_state.setdefault("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+    report["terminal_state"] = terminal_state
+    report["current"] = terminal_state
+    if terminal_state == "completed":
+        report["stage_status"] = {stage: "completed" for stage in PIPELINE_STAGES}
+        report["completed"] = list(PIPELINE_STAGES)
+        report["current_index"] = len(PIPELINE_STAGES)
+    report["updated_at"] = datetime.now().isoformat()
+
 
 def init_scan_telemetry() -> dict:
     """Structure de télémétrie minimale (baseline instrumentation)."""
@@ -70,6 +113,8 @@ def init_scan_telemetry() -> dict:
         "chunks_total": 0,
         "chunks_processed": 0,
         "tokens_estimated_total": 0,
+        "bytes_discovered": 0,
+        "bytes_scheduled": 0,
         "chunks_by_file": {},
         "tokens_estimated_by_file": {},
     }
@@ -142,6 +187,16 @@ def sanitize_for_log(value: Any) -> Any:
 
 def start_scan_stage(stage_name: str) -> float:
     scan_state["current_stage"] = stage_name
+    report = scan_state.setdefault("stage_report", init_stage_report(stage_name))
+    stage_status = report.setdefault("stage_status", {stage: "pending" for stage in PIPELINE_STAGES})
+    for stage in PIPELINE_STAGES:
+        stage_status.setdefault(stage, "pending")
+    if stage_name in stage_status:
+        stage_status[stage_name] = "active"
+    report["current"] = stage_name
+    report["current_index"] = _pipeline_stage_index(stage_name)
+    report["terminal_state"] = None
+    report["updated_at"] = datetime.now().isoformat()
     add_log(f"▶ Stage {stage_name}", "info", stage=stage_name, event="stage_start")
     return time.time()
 
@@ -153,6 +208,17 @@ def end_scan_stage(stage_name: str, started_at: Optional[float]):
     telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
     stage_timings = telemetry.setdefault("stage_timings_ms", {})
     stage_timings[stage_name] = round(stage_timings.get(stage_name, 0.0) + elapsed_ms, 2)
+    report = scan_state.setdefault("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+    stage_status = report.setdefault("stage_status", {stage: "pending" for stage in PIPELINE_STAGES})
+    for stage in PIPELINE_STAGES:
+        stage_status.setdefault(stage, "pending")
+    if stage_name in stage_status:
+        stage_status[stage_name] = "completed"
+    completed = report.setdefault("completed", [])
+    if stage_name in PIPELINE_STAGES and stage_name not in completed:
+        completed.append(stage_name)
+        completed.sort(key=lambda item: PIPELINE_STAGES.index(item))
+    report["updated_at"] = datetime.now().isoformat()
     add_log(
         f"✅ Stage {stage_name} terminé ({elapsed_ms:.0f}ms)",
         "info",
@@ -508,6 +574,9 @@ BUILD_TIME_FILES = {
     '.prettierrc',
 }
 
+SCAN_EXCLUDE_DIRS = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv', 'audit_logs', 'reports', 'coverage'}
+DEVSECOPS_EXTRA_FILENAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml"}
+
 # ==========================================
 # 🚫 VULNÉRABILITÉS IMPOSSIBLES PAR LANGAGE
 # ==========================================
@@ -569,6 +638,7 @@ scan_state = {
     "is_scanning": False,
     "start_time": None,
     "current_stage": "idle",
+    "stage_report": init_stage_report("idle"),
     "progress": 0,
     "current_file": "",
     "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
@@ -583,6 +653,7 @@ scan_state = {
     "profile": None,
     "mode": None,
     "budget_info": {},
+    "preflight": {},
     "telemetry": init_scan_telemetry()
 }
 
@@ -1636,6 +1707,211 @@ class StableEngine:
 
 
 # ==========================================
+# 📐 PREFLIGHT + ESTIMATION
+# ==========================================
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def format_bytes(value: int) -> str:
+    size = float(max(0, int(value)))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    precision = 0 if idx == 0 else 2
+    return f"{size:.{precision}f} {units[idx]}"
+
+
+def should_scan_file(filename: str, resolved_mode_key: str, extensions: Tuple[str, ...]) -> bool:
+    if resolved_mode_key in ("rapid", "deep") and filename in BUILD_TIME_FILES:
+        return False
+    if filename.endswith(extensions):
+        return True
+    if resolved_mode_key == "devsecops" and filename in DEVSECOPS_EXTRA_FILENAMES:
+        return True
+    return False
+
+
+def collect_scan_candidates(target_dir: str, resolved_mode_key: str, mode_config: Dict[str, Any]) -> Dict[str, Any]:
+    extensions = tuple(mode_config.get("file_extensions") or ())
+    discovered_files: List[str] = []
+    file_sizes: Dict[str, int] = {}
+
+    for root, dirs, filenames in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDE_DIRS]
+        for filename in filenames:
+            if not should_scan_file(filename, resolved_mode_key, extensions):
+                continue
+            full_path = os.path.join(root, filename)
+            discovered_files.append(full_path)
+            try:
+                file_sizes[full_path] = max(0, int(os.path.getsize(full_path)))
+            except OSError:
+                file_sizes[full_path] = 0
+
+    prioritized_entries = MODE_CONTROLLER.prioritize_files(discovered_files, resolved_mode_key)
+    files_discovered = len(prioritized_entries)
+
+    max_files = mode_config.get("max_files")
+    files_skipped = 0
+    if max_files and files_discovered > max_files:
+        files_skipped = files_discovered - max_files
+        prioritized_entries = prioritized_entries[:max_files]
+
+    scheduled_paths = [entry.get("path") for entry in prioritized_entries if entry.get("path")]
+    bytes_discovered = sum(file_sizes.get(path, 0) for path in discovered_files)
+    bytes_scheduled = sum(file_sizes.get(path, 0) for path in scheduled_paths)
+
+    return {
+        "file_entries": prioritized_entries,
+        "file_sizes": file_sizes,
+        "files_discovered": files_discovered,
+        "files_scheduled": len(prioritized_entries),
+        "files_skipped": files_skipped,
+        "bytes_discovered": bytes_discovered,
+        "bytes_scheduled": bytes_scheduled,
+    }
+
+
+def _estimate_tokens_and_chunks(file_sizes: Dict[str, int], chunk_budget_tokens: int, max_chunks_per_file: int) -> Tuple[int, int]:
+    token_budget = max(1, int(chunk_budget_tokens))
+    max_chunks = max(1, int(max_chunks_per_file))
+    tokens_total = 0
+    chunks_total = 0
+
+    for size in file_sizes.values():
+        if size <= 0:
+            continue
+        est_tokens = max(1, int(size / 4))
+        tokens_total += est_tokens
+        needed_chunks = 1 if est_tokens <= token_budget else int(math.ceil(est_tokens / token_budget))
+        chunks_total += max(1, min(max_chunks, needed_chunks))
+
+    return tokens_total, chunks_total
+
+
+def build_scan_preflight(
+    target: str,
+    profile_key: str,
+    mode_key: str,
+    ollama_mode: str = "auto",
+    ollama_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
+    mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
+    resolved_mode_key = MODE_CONTROLLER.resolve_mode_key(mode_key=mode_key, mode_config=mode)
+    resolved_ollama_base = get_ollama_base_url(ollama_mode=ollama_mode, ollama_url=ollama_url)
+    llm_plan = BUDGET_CONTROLLER.compute_plan(
+        profile_key=profile_key,
+        mode_key=resolved_mode_key,
+        profile_config=profile,
+        mode_config=mode,
+        ollama_mode=ollama_mode,
+    )
+
+    tmp_dir = None
+    target_dir = target
+    cloned_repo = False
+
+    try:
+        if target.startswith(("http", "git@")):
+            tmp_dir = tempfile.mkdtemp(prefix="nexus_preflight_")
+            Repo.clone_from(target, tmp_dir)
+            target_dir = tmp_dir
+            cloned_repo = True
+
+        collected = collect_scan_candidates(target_dir, resolved_mode_key, mode)
+        scheduled_size_map = {
+            entry["path"]: collected["file_sizes"].get(entry["path"], 0)
+            for entry in collected["file_entries"]
+            if entry.get("path")
+        }
+
+        chunk_budget = compute_chunk_token_budget(profile, mode)
+        max_chunks = resolve_max_chunks(mode)
+        tokens_estimated, chunks_estimated = _estimate_tokens_and_chunks(
+            scheduled_size_map,
+            chunk_budget_tokens=chunk_budget,
+            max_chunks_per_file=max_chunks,
+        )
+
+        context_factor = float(llm_plan.get("max_context_tokens", 8192)) / 8192.0
+        output_factor = float(llm_plan.get("max_output_tokens", 1024)) / 1024.0
+        mode_factor = {"rapid": 0.78, "deep": 1.0, "devsecops": 1.18}.get(resolved_mode_key, 1.0)
+        remote_factor = 1.32 if ollama_mode == "remote" else 1.0
+        pass_factor = max(1, int(llm_plan.get("analysis_passes", 1)))
+        per_chunk_seconds = (1.7 + (context_factor * 0.65) + (output_factor * 0.35)) * mode_factor * remote_factor
+        per_chunk_seconds = max(1.0, min(per_chunk_seconds, float(llm_plan.get("timeout_s", 90)) * 0.75))
+
+        analyze_eta = 0.0
+        if chunks_estimated > 0:
+            concurrency = max(1, int(llm_plan.get("concurrency", 1)))
+            analyze_eta = (chunks_estimated * per_chunk_seconds * pass_factor) / concurrency
+
+        stage_estimates_s = {
+            "normalize": round(2.0 if cloned_repo else 0.30, 2),
+            "index": round(max(0.15, collected["files_discovered"] * 0.01), 2),
+            "analyze": round(analyze_eta, 2),
+            "correlate": round(max(0.20, collected["files_scheduled"] * 0.02), 2),
+            "report": round(max(0.15, collected["files_scheduled"] * 0.01), 2),
+        }
+        eta_seconds = round(sum(stage_estimates_s.values()), 2)
+
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "target": target,
+            "target_dir": target_dir,
+            "profile": profile_key,
+            "mode": resolved_mode_key,
+            "ollama_mode": ollama_mode,
+            "ollama_url": resolved_ollama_base,
+            "stage_sequence": list(PIPELINE_STAGES),
+            "files": {
+                "discovered": collected["files_discovered"],
+                "scheduled": collected["files_scheduled"],
+                "skipped": collected["files_skipped"],
+            },
+            "size": {
+                "discovered_bytes": collected["bytes_discovered"],
+                "scheduled_bytes": collected["bytes_scheduled"],
+                "discovered_human": format_bytes(collected["bytes_discovered"]),
+                "scheduled_human": format_bytes(collected["bytes_scheduled"]),
+            },
+            "llm_plan": {
+                "max_context_tokens": llm_plan.get("max_context_tokens"),
+                "max_output_tokens": llm_plan.get("max_output_tokens"),
+                "concurrency": llm_plan.get("concurrency"),
+                "analysis_passes": llm_plan.get("analysis_passes"),
+                "timeout_s": llm_plan.get("timeout_s"),
+            },
+            "chunking": {
+                "chunk_token_budget": chunk_budget,
+                "max_chunks_per_file": max_chunks,
+                "tokens_estimated_total": tokens_estimated,
+                "chunks_estimated_total": chunks_estimated,
+            },
+            "eta": {
+                "seconds": eta_seconds,
+                "human": format_duration(eta_seconds),
+                "by_stage_seconds": stage_estimates_s,
+            },
+        }
+    finally:
+        if tmp_dir and os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ==========================================
 # 🚀 ORCHESTRATION DU SCAN
 # ==========================================
 
@@ -1653,6 +1929,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         add_log(f"❌ Erreur config Ollama: {e}", "error")
         scan_state["is_scanning"] = False
         scan_state["current_stage"] = "failed"
+        mark_stage_terminal_state("failed")
         return
     
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
@@ -1671,6 +1948,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         "is_scanning": True,
         "start_time": time.time(),
         "current_stage": "normalize",
+        "stage_report": init_stage_report("normalize"),
         "progress": 0,
         "current_file": "",
         "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
@@ -1691,6 +1969,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             "min_confidence": mode["min_confidence"],
             "llm_budget": budget_plan,
         },
+        "preflight": {},
         "telemetry": init_scan_telemetry()
     })
 
@@ -1750,6 +2029,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             current_stage, stage_started_at = None, None
         scan_state["is_scanning"] = False
         scan_state["current_stage"] = "failed"
+        mark_stage_terminal_state("failed")
         return
 
     tmp_dir = None
@@ -1778,37 +2058,19 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
 
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "index")
         
-        # Collecte des fichiers selon le mode
-        files = []
-        extensions = mode["file_extensions"]
-        # V3.0 FIX: Exclure explicitement audit_logs et reports pour éviter l'auto-scan
-        exclude = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv', 'audit_logs', 'reports', 'coverage'}
-        
-        # V3.0: Scanner le répertoire
-        for root, dirs, filenames in os.walk(target_dir):
-            dirs[:] = [d for d in dirs if d not in exclude]
-            
-            for f in filenames:
-                full_path = os.path.join(root, f)
-                
-                # V3.0: Ignorer fichiers build-time en Rapid/Deep
-                if resolved_mode_key in ("rapid", "deep") and f in BUILD_TIME_FILES:
-                    continue
-                
-                if f.endswith(extensions) or (resolved_mode_key == "devsecops" and f in ['Dockerfile', 'docker-compose.yml']):
-                    files.append(os.path.join(root, f))
-
         telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
-        file_entries = MODE_CONTROLLER.prioritize_files(files, resolved_mode_key)
-        discovered_count = len(file_entries)
+        collection = collect_scan_candidates(target_dir, resolved_mode_key, mode)
+        file_entries = collection["file_entries"]
+        discovered_count = collection["files_discovered"]
         telemetry["files_discovered"] = discovered_count
+        telemetry["bytes_discovered"] = collection["bytes_discovered"]
+        telemetry["bytes_scheduled"] = collection["bytes_scheduled"]
         telemetry["mode_strategy"] = resolved_mode_key
         telemetry["hotspot_files_discovered"] = sum(1 for entry in file_entries if entry.get("score", 0) > 0 and entry.get("reasons"))
-        
-        # Limiter selon le mode
-        max_files = mode["max_files"]
-        if max_files and discovered_count > max_files:
-            skipped_count = discovered_count - max_files
+
+        if collection["files_skipped"] > 0:
+            skipped_count = collection["files_skipped"]
+            max_files = mode["max_files"]
             add_log(
                 f"✂️ Limite mode {mode_key}: {discovered_count} → {max_files} fichiers",
                 "info",
@@ -1818,14 +2080,20 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 scheduled=max_files,
                 skipped=skipped_count,
             )
-            file_entries = file_entries[:max_files]
             scan_state["stats"]["skipped"] = skipped_count
         else:
             scan_state["stats"]["skipped"] = 0
-        
-        total_files = len(file_entries)
+
+        total_files = collection["files_scheduled"]
         telemetry["files_scheduled"] = total_files
         scan_state["stats"]["files"] = total_files
+        scan_state["preflight"] = {
+            "files_discovered": discovered_count,
+            "files_scheduled": total_files,
+            "files_skipped": scan_state["stats"]["skipped"],
+            "bytes_scheduled": collection["bytes_scheduled"],
+            "mode_strategy": resolved_mode_key,
+        }
 
         add_log(
             f"📂 Index terminé: {total_files} fichier(s) planifié(s)",
@@ -1841,6 +2109,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             scan_state["progress"] = 100
             scan_state["estimated_time"] = "Terminé"
             scan_state["current_stage"] = "completed"
+            mark_stage_terminal_state("completed")
             return
 
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "analyze")
@@ -1965,12 +2234,15 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             }
             save_to_history(summary)
             scan_state["current_stage"] = "completed"
+            mark_stage_terminal_state("completed")
         else:
             scan_state["current_stage"] = "stopped"
+            mark_stage_terminal_state("stopped")
 
     except Exception as e:
         add_log(f"🔥 Erreur Critique: {str(e)}", "critical", stage=scan_state.get("current_stage"), event="scan_error")
         scan_state["current_stage"] = "failed"
+        mark_stage_terminal_state("failed")
     finally:
         if current_stage:
             end_scan_stage(current_stage, stage_started_at)
@@ -2019,6 +2291,38 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     )
     return {"success": True, "msg": f"Scan lancé (profil: {request.profile}, mode: {request.mode})"}
 
+
+@app.post("/scan/preflight")
+async def scan_preflight(request: ScanRequest):
+    try:
+        preflight = build_scan_preflight(
+            target=request.target,
+            profile_key=request.profile,
+            mode_key=request.mode,
+            ollama_mode=request.ollama_mode,
+            ollama_url=request.ollama_url,
+        )
+        scan_state["preflight"] = preflight
+        add_log(
+            "📐 Preflight calculé",
+            "info",
+            stage="normalize",
+            event="preflight_ready",
+            files=preflight.get("files", {}),
+            eta=preflight.get("eta", {}),
+            mode=preflight.get("mode"),
+            profile=preflight.get("profile"),
+        )
+        return {"success": True, "preflight": preflight}
+    except Exception as e:
+        add_log(
+            f"⚠️ Preflight impossible: {str(e)[:200]}",
+            "warning",
+            stage="normalize",
+            event="preflight_error",
+        )
+        return {"success": False, "message": f"Preflight impossible: {str(e)[:200]}"}
+
 @app.post("/ollama/test")
 async def test_ollama(request: dict):
     """Teste la connexion à un serveur Ollama et liste les modèles"""
@@ -2061,11 +2365,18 @@ async def stop_scan():
     scan_state["should_stop"] = True
     scan_state["is_scanning"] = False
     scan_state["current_stage"] = "stopped"
+    mark_stage_terminal_state("stopped")
     add_log("🛑 Arrêt demandé par l'utilisateur", "warning")
     return {"success": True, "message": "Scan stopping..."}
 
+@app.get("/scan/stages")
+async def get_scan_stages():
+    return scan_state.get("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+
 @app.get("/scan/status")
 async def get_status():
+    if "stage_report" not in scan_state:
+        scan_state["stage_report"] = init_stage_report(scan_state.get("current_stage", "idle"))
     return scan_state
 
 @app.get("/history")

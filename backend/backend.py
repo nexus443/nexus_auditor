@@ -32,6 +32,11 @@ try:
 except ImportError:
     from scan_mode_controller import ScanModeController
 
+try:
+    from .aggregation import aggregate_findings, ensure_proof
+except ImportError:
+    from aggregation import aggregate_findings, ensure_proof
+
 # ==========================================
 # ⚙️ NEXUS AUDITOR V3.0 STABLE
 # ==========================================
@@ -1099,7 +1104,7 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     final_fix = vuln.get("fix", vuln.get("recommendation", ""))
     if not final_fix: final_fix = "Voir les recommandations de sécurité standard pour ce type."
     
-    return {
+    normalized = {
         "file": filename,
         "filepath": filepath,
         "title": title if title else final_type,
@@ -1118,6 +1123,7 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
         "evidence_missing": False,
         "needs_manual_review": False
     }
+    return ensure_proof(normalized)
 
 
 # ==========================================
@@ -1194,11 +1200,19 @@ class StableEngine:
     1 appel IA = 1 analyse simple
     """
     
-    def __init__(self, profile_config: dict, mode_config: dict, budget_plan: Optional[dict] = None, ollama_base_url: str = None):
+    def __init__(
+        self,
+        profile_config: dict,
+        mode_config: dict,
+        budget_plan: Optional[dict] = None,
+        ollama_base_url: str = None,
+        profile_name: str = "balanced",
+    ):
         self.profile = profile_config
         self.mode = mode_config
         self.fallback_model = "qwen2.5-coder:7b"  # V2.5: Fallback cohérent
         self.budget_plan = budget_plan or {}
+        self.profile_name = profile_name or str(self.budget_plan.get("profile") or "balanced")
         self.ollama_base_url = ollama_base_url or OLLAMA_BASE_URL  # Custom ou défaut
 
     def _build_llm_options(
@@ -1277,6 +1291,7 @@ class StableEngine:
         for idx, finding in enumerate(findings):
             verdict = verdicts.get(idx)
             if not verdict:
+                finding["verification_status"] = "unverified"
                 adjusted.append(finding)
                 continue
 
@@ -1300,6 +1315,7 @@ class StableEngine:
             if verdict_type == "confirm":
                 finding["note"] = f"Verify pass: confirmed. {reason}".strip()
 
+            finding["verification_status"] = verdict_type if verdict_type in {"confirm", "uncertain"} else "unverified"
             finding["confidence"] = round(max(0.0, min(100.0, float(finding.get("confidence", 0.0)) + delta)), 2)
             adjusted.append(finding)
 
@@ -1543,6 +1559,9 @@ class StableEngine:
                             
                             # Normalisation (V3.1: Pass full content for line finding)
                             normalized = normalize_vulnerability(v, filepath, filename, raw_response, content)
+                            normalized["chunk_index"] = i + 1
+                            normalized["chunk_total"] = len(chunks)
+                            normalized["chunk_refs"] = [i + 1]
                             
                             # Ajustement confiance si chunk partiel
                             if len(chunks) > 1:
@@ -1591,8 +1610,23 @@ class StableEngine:
             # Filtrage POST-IA selon le mode (avec contenu pour validation preuve)
             add_log(f"🔄 Post-processing: {len(all_vulns)} findings bruts", "info")
             filtered_vulns = apply_mode_filters(all_vulns, self.mode, filepath, content)
-            
-            return filtered_vulns
+            deduped_vulns = aggregate_findings(
+                filtered_vulns,
+                profile_key=self.profile_name,
+                verify_expected=bool(self.budget_plan.get("enable_verify_pass", False)),
+            )
+            if len(deduped_vulns) != len(filtered_vulns):
+                add_log(
+                    f"🧩 Dedup/Merge: {len(filtered_vulns)} -> {len(deduped_vulns)} findings ({filename})",
+                    "info",
+                    stage="correlate",
+                    event="dedup_merge",
+                    filename=filename,
+                    before=len(filtered_vulns),
+                    after=len(deduped_vulns),
+                )
+
+            return deduped_vulns
 
 
         except Exception as e:
@@ -1812,7 +1846,13 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "analyze")
         add_log(f"📁 {total_files} fichiers à analyser", "info", stage="analyze", event="analyze_start", files=total_files)
 
-        engine = StableEngine(profile, mode, budget_plan=budget_plan, ollama_base_url=base_url)
+        engine = StableEngine(
+            profile,
+            mode,
+            budget_plan=budget_plan,
+            ollama_base_url=base_url,
+            profile_name=profile_key,
+        )
         start_ts = time.time()
         cross_file_hints: List[str] = []
         

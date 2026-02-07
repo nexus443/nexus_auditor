@@ -22,6 +22,11 @@ try:
 except ImportError:
     from chunker import build_chunk_plan
 
+try:
+    from .llm_budget_controller import LLMBudgetController
+except ImportError:
+    from llm_budget_controller import LLMBudgetController
+
 # ==========================================
 # ⚙️ NEXUS AUDITOR V3.0 STABLE
 # ==========================================
@@ -337,6 +342,35 @@ CODE FILE ({filename}):
 ```
 """
 
+VERIFY_PROMPT = """You are a strict security verifier.
+
+Validate each candidate finding against the provided code chunk.
+Rules:
+- Return JSON only.
+- verdict must be one of: confirm, uncertain, reject.
+- Reject when evidence does not exist in the code.
+- Be conservative: uncertain if proof is partial.
+
+Return schema:
+[
+  {
+    "idx": 0,
+    "verdict": "confirm|uncertain|reject",
+    "confidence_adjustment": -30..10,
+    "reason": "short reason"
+  }
+]
+
+FILE: {filename}
+CANDIDATES:
+{candidates_json}
+
+CODE CHUNK:
+```
+{content}
+```
+"""
+
 # ==========================================
 # ⚡ PROFILS DE PUISSANCE (INFRASTRUCTURE)
 # ==========================================
@@ -437,6 +471,8 @@ SCAN_MODES = {
         "description_long": "Tout voir (Confiance 30%+, Sévérité Low+)"
     }
 }
+
+BUDGET_CONTROLLER = LLMBudgetController()
 
 # ==========================================
 # 🚫 FICHIERS BUILD-TIME À IGNORER (Rapid/Deep)
@@ -1152,27 +1188,144 @@ class StableEngine:
     1 appel IA = 1 analyse simple
     """
     
-    def __init__(self, profile_config: dict, mode_config: dict, ollama_base_url: str = None):
+    def __init__(self, profile_config: dict, mode_config: dict, budget_plan: Optional[dict] = None, ollama_base_url: str = None):
         self.profile = profile_config
         self.mode = mode_config
         self.fallback_model = "qwen2.5-coder:7b"  # V2.5: Fallback cohérent
+        self.budget_plan = budget_plan or {}
         self.ollama_base_url = ollama_base_url or OLLAMA_BASE_URL  # Custom ou défaut
+
+    def _build_llm_options(
+        self,
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None
+    ) -> dict:
+        return {
+            "temperature": float(temperature if temperature is not None else self.budget_plan.get("temperature", 0.1)),
+            "top_p": float(top_p if top_p is not None else self.budget_plan.get("top_p", 0.9)),
+            "num_ctx": int(self.budget_plan.get("max_context_tokens", self.profile.get("num_ctx", 8192))),
+            "num_predict": int(max_output_tokens if max_output_tokens is not None else self.budget_plan.get("max_output_tokens", self.profile.get("num_predict", 1024))),
+        }
+
+    def _should_early_exit(self, current_findings: list) -> bool:
+        strategy = self.budget_plan.get("early_exit_strategy", "none")
+        if strategy != "first_high_confidence":
+            return False
+
+        threshold = int(self.budget_plan.get("early_exit_confidence", 60))
+        for finding in current_findings:
+            severity = str(finding.get("severity", "")).lower()
+            confidence = float(finding.get("confidence", 0))
+            if severity in {"critical", "high"} and confidence >= threshold:
+                return True
+        return False
+
+    def _verify_findings_for_chunk(self, filename: str, chunk: str, findings: list, chunk_index: int, chunk_total: int) -> list:
+        if not findings or not self.budget_plan.get("enable_verify_pass", False):
+            return findings
+
+        candidates = []
+        for idx, finding in enumerate(findings):
+            candidates.append({
+                "idx": idx,
+                "title": finding.get("title"),
+                "type": finding.get("type"),
+                "severity": finding.get("severity"),
+                "confidence": finding.get("confidence"),
+                "line": finding.get("line"),
+                "evidence": str(finding.get("evidence", ""))[:300],
+            })
+
+        verify_prompt = VERIFY_PROMPT.format(
+            filename=f"{filename} (part {chunk_index}/{chunk_total})",
+            candidates_json=json.dumps(candidates, ensure_ascii=False),
+            content=chunk[:16000],
+        )
+
+        verify_result = self.call_ollama(
+            verify_prompt,
+            filename=filename,
+            max_retries=self.budget_plan.get("verify_retries", 1),
+            chunk_index=chunk_index,
+            chunk_total=chunk_total,
+            purpose="verify",
+            max_output_tokens=self.budget_plan.get("verify_max_output_tokens", 512),
+            temperature=float(self.budget_plan.get("verify_temperature", 0.0)),
+            top_p=float(self.budget_plan.get("verify_top_p", 0.7)),
+        )
+
+        if not verify_result or not isinstance(verify_result.get("data"), list):
+            return findings
+
+        verdicts = {}
+        for item in verify_result["data"]:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("idx")
+            if not isinstance(idx, int):
+                continue
+            verdicts[idx] = item
+
+        adjusted = []
+        for idx, finding in enumerate(findings):
+            verdict = verdicts.get(idx)
+            if not verdict:
+                adjusted.append(finding)
+                continue
+
+            verdict_type = str(verdict.get("verdict", "")).lower()
+            reason = str(verdict.get("reason", "")).strip()
+            delta_raw = verdict.get("confidence_adjustment", 0)
+            try:
+                delta = int(delta_raw)
+            except Exception:
+                delta = 0
+            delta = max(-30, min(10, delta))
+
+            if verdict_type == "reject":
+                continue
+
+            if verdict_type == "uncertain":
+                delta = min(delta, -10)
+                finding["note"] = f"Verify pass: uncertain. {reason}".strip()
+                finding["needs_manual_review"] = True
+
+            if verdict_type == "confirm":
+                finding["note"] = f"Verify pass: confirmed. {reason}".strip()
+
+            finding["confidence"] = round(max(0.0, min(100.0, float(finding.get("confidence", 0.0)) + delta)), 2)
+            adjusted.append(finding)
+
+        return adjusted
 
     def call_ollama(
         self,
         prompt: str,
         filename: str,
-        max_retries=2,
+        max_retries: Optional[int] = None,
         chunk_index: Optional[int] = None,
-        chunk_total: Optional[int] = None
+        chunk_total: Optional[int] = None,
+        purpose: str = "analysis",
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> Optional[dict]:
         """Appel IA simple avec retry et fallback"""
-        timeout = self.profile.get("timeout", 180)
+        timeout = int(self.budget_plan.get("timeout_s", self.profile.get("timeout", 180)))
         model = self.profile["model"]
-        
-        # V2.5: Utiliser num_predict du mode si override défini (Rapid = très court)
-        num_predict = self.mode.get("num_predict_override") or self.profile["num_predict"]
-        
+
+        if max_retries is None:
+            max_retries = int(self.budget_plan.get("retries", 1))
+        max_retries = max(1, int(max_retries))
+        backoff_factor = float(self.budget_plan.get("retry_backoff_factor", 1.5))
+
+        llm_options = self._build_llm_options(
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
         for attempt in range(max_retries):
             request_start = time.time()
             request_success = False
@@ -1181,11 +1334,11 @@ class StableEngine:
             try:
                 if attempt > 0:
                     add_log(f"🔄 Retry {attempt+1}/{max_retries} pour {filename}", "warning")
-                    time.sleep(2 ** attempt)
+                    time.sleep(backoff_factor ** attempt)
                 
                 chunk_label = f" chunk {chunk_index}/{chunk_total}" if chunk_index and chunk_total else ""
                 add_log(
-                    f"🤖 Analyse: {filename}{chunk_label} (modèle: {model})",
+                    f"🤖 {purpose.capitalize()}: {filename}{chunk_label} (modèle: {model})",
                     "info",
                     stage="analyze",
                     event="llm_dispatch",
@@ -1193,6 +1346,8 @@ class StableEngine:
                     chunk_index=chunk_index,
                     chunk_total=chunk_total,
                     model=model,
+                    purpose=purpose,
+                    options=llm_options,
                 )
                 
                 response = requests.post(
@@ -1202,11 +1357,7 @@ class StableEngine:
                         "prompt": prompt,
                         "stream": False,
                         "format": "json",
-                        "options": {
-                            "temperature": 0.1,
-                            "num_ctx": self.profile["num_ctx"],
-                            "num_predict": num_predict  # V2.5: Peut être overridé par mode
-                        }
+                        "options": llm_options
                     },
                     timeout=timeout
                 )
@@ -1352,7 +1503,7 @@ class StableEngine:
                 result = self.call_ollama(
                     prompt,
                     filename,
-                    max_retries=1,
+                    max_retries=self.budget_plan.get("retries"),
                     chunk_index=i + 1,
                     chunk_total=len(chunks),
                 )
@@ -1363,6 +1514,7 @@ class StableEngine:
                     
                     if isinstance(data, dict): data = [data]
                     if isinstance(data, list):
+                        normalized_chunk_findings = []
                         for v in data:
                             if not isinstance(v, dict): continue
                             
@@ -1373,9 +1525,31 @@ class StableEngine:
                             if len(chunks) > 1:
                                 normalized["confidence"] = min(normalized["confidence"], 90)
 
-                            all_vulns.append(normalized)
+                            normalized_chunk_findings.append(normalized)
+
+                        if normalized_chunk_findings and self.budget_plan.get("enable_verify_pass", False):
+                            normalized_chunk_findings = self._verify_findings_for_chunk(
+                                filename=filename,
+                                chunk=chunk,
+                                findings=normalized_chunk_findings,
+                                chunk_index=i + 1,
+                                chunk_total=len(chunks),
+                            )
+
+                        all_vulns.extend(normalized_chunk_findings)
                         
                         scan_state["successful_analyses"] += 1
+
+                        if self._should_early_exit(normalized_chunk_findings):
+                            add_log(
+                                f"⚡ Early-exit activé pour {filename} (finding critique confirmé)",
+                                "info",
+                                stage="analyze",
+                                event="early_exit",
+                                filename=filename,
+                                strategy=self.budget_plan.get("early_exit_strategy"),
+                            )
+                            break
                 else:
                     scan_state["failed_analyses"] += 1
 
@@ -1426,6 +1600,13 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
     
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
+    budget_plan = BUDGET_CONTROLLER.compute_plan(
+        profile_key=profile_key,
+        mode_key=mode_key,
+        profile_config=profile,
+        mode_config=mode,
+        ollama_mode=ollama_mode,
+    )
 
     scan_state.update({
         "id": scan_id,
@@ -1449,7 +1630,8 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             "max_files": mode["max_files"],
             "max_time_per_file": mode["max_time_per_file"],
             "min_severity": mode["min_severity"],
-            "min_confidence": mode["min_confidence"]
+            "min_confidence": mode["min_confidence"],
+            "llm_budget": budget_plan,
         },
         "telemetry": init_scan_telemetry()
     })
@@ -1481,6 +1663,15 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         max_files=mode["max_files"],
         min_severity=mode["min_severity"],
         min_confidence=mode["min_confidence"],
+    )
+    add_log(
+        f"🧮 LLM plan: ctx={budget_plan['max_context_tokens']} out={budget_plan['max_output_tokens']} "
+        f"temp={budget_plan['temperature']} top_p={budget_plan['top_p']} retries={budget_plan['retries']} "
+        f"timeout={budget_plan['timeout_s']}s passes={budget_plan['analysis_passes']} concurrency={budget_plan['concurrency']}",
+        "info",
+        stage="normalize",
+        event="llm_budget_plan",
+        llm_budget_plan=budget_plan,
     )
     add_log("Initialisation du scan...", "info", stage="normalize", event="scan_init")
 
@@ -1587,7 +1778,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "analyze")
         add_log(f"📁 {total_files} fichiers à analyser", "info", stage="analyze", event="analyze_start", files=total_files)
 
-        engine = StableEngine(profile, mode, ollama_base_url=base_url)
+        engine = StableEngine(profile, mode, budget_plan=budget_plan, ollama_base_url=base_url)
         start_ts = time.time()
         
         for i, filepath in enumerate(files):
@@ -1667,6 +1858,15 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                 "duration_seconds": int(total_time),
                 "successful_analyses": scan_state["successful_analyses"],
                 "failed_analyses": scan_state["failed_analyses"],
+                "llm_budget": {
+                    "max_context_tokens": budget_plan.get("max_context_tokens"),
+                    "max_output_tokens": budget_plan.get("max_output_tokens"),
+                    "temperature": budget_plan.get("temperature"),
+                    "top_p": budget_plan.get("top_p"),
+                    "retries": budget_plan.get("retries"),
+                    "analysis_passes": budget_plan.get("analysis_passes"),
+                    "concurrency": budget_plan.get("concurrency"),
+                },
                 "telemetry": {
                     "stage_timings_ms": scan_state["telemetry"].get("stage_timings_ms", {}),
                     "llm_requests": scan_state["telemetry"].get("llm_requests", 0),

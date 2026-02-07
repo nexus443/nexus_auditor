@@ -17,6 +17,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from git import Repo
 
+try:
+    from .chunker import build_chunk_plan
+except ImportError:
+    from chunker import build_chunk_plan
+
 # ==========================================
 # ⚙️ NEXUS AUDITOR V3.0 STABLE
 # ==========================================
@@ -1266,49 +1271,52 @@ class StableEngine:
             
             if not content.strip():
                 return []
-            
-            # --- V3.1 SMART CHUNKING ---
-            char_count = len(content)
-            chunk_size = self.profile["chunk_size"]
-            max_chunks = self.mode.get("max_chunks_per_file", 100) # Default large
-            
-            chunks = []
-            
-            if char_count <= chunk_size:
-                # 1. Fits in context => 1 Chunk
-                chunks.append(content)
-            else:
-                # 2. Too big => Split
-                # Overlap de 500 chars pour éviter couper code critique
-                overlap = 500
-                start = 0
-                while start < char_count:
-                    end = min(start + chunk_size, char_count)
-                    chunks.append(content[start:end])
-                    start += (chunk_size - overlap)
-                    
-                    if len(chunks) >= max_chunks:
-                        add_log(f"✂️ Limite chunks atteinte ({max_chunks}) pour {filename}", "info")
-                        break
+
+            chunk_plan = build_chunk_plan(content, filepath, self.profile, self.mode)
+            chunk_infos = chunk_plan.get("chunks", [])
+            chunk_entries = [c for c in chunk_infos if c.get("content", "").strip()]
+            chunks = [c.get("content", "") for c in chunk_entries]
+            if not chunks:
+                return []
+
+            chunk_token_estimates = [int(c.get("tokens_estimated", estimate_tokens_from_text(c.get("content", "")))) for c in chunk_entries]
+            strategy = chunk_plan.get("strategy", "unknown")
+            language = chunk_plan.get("language", "unknown")
+            token_budget = int(chunk_plan.get("token_budget", 0))
+            overlap_tokens = int(chunk_plan.get("overlap_tokens", 0))
+            max_chunks = int(chunk_plan.get("max_chunks", len(chunks)))
+
+            if len(chunks) >= max_chunks and estimate_tokens_from_text(content) > token_budget:
+                add_log(
+                    f"✂️ Limite chunks atteinte ({max_chunks}) pour {filename}",
+                    "info",
+                    stage="analyze",
+                    event="chunk_limit_hit",
+                    filename=filename,
+                    max_chunks=max_chunks,
+                )
             
             scan_state["current_file"] = filename
             all_vulns = []
 
             telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
-            chunk_token_estimates = [estimate_tokens_from_text(chunk) for chunk in chunks]
             total_chunk_tokens = sum(chunk_token_estimates)
             telemetry["chunks_total"] += len(chunks)
             telemetry["chunks_by_file"][filename] = len(chunks)
             telemetry["tokens_estimated_by_file"][filename] = total_chunk_tokens
             telemetry["tokens_estimated_total"] += total_chunk_tokens
             add_log(
-                f"📦 {filename}: {len(chunks)} chunk(s), ~{total_chunk_tokens} tokens estimés",
+                f"📦 {filename}: {len(chunks)} chunk(s), ~{total_chunk_tokens} tokens estimés ({strategy}/{language})",
                 "info",
                 stage="analyze",
                 event="chunk_plan",
                 filename=filename,
                 chunks=len(chunks),
                 tokens_estimated=total_chunk_tokens,
+                strategy=strategy,
+                language=language,
+                chunk_token_budget=token_budget,
+                overlap_tokens=overlap_tokens,
             )
             
             file_start_global = time.time()

@@ -113,6 +113,14 @@ def compute_chunk_token_budget(profile_config: Dict, mode_config: Dict) -> int:
     # Réserve pour prompt système + réponse + marge de sécurité.
     reserve = max(600 + num_predict, int(num_ctx * 0.20))
     available = max(512, num_ctx - reserve)
+    explicit_target = mode_config.get("target_chunk_tokens")
+    if explicit_target is not None:
+        try:
+            explicit_budget = int(explicit_target)
+        except (TypeError, ValueError):
+            explicit_budget = 0
+        if explicit_budget > 0:
+            return max(256, min(explicit_budget, available))
 
     mode_factor = {
         "rapid": 0.45,
@@ -361,4 +369,3 @@ def build_chunk_plan(content: str, filepath: str, profile_config: Dict, mode_con
             for chunk in built
         ],
     }
-

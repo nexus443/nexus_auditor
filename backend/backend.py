@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import math
+import random
 import requests
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ import uuid
 import difflib
 import signal
 from datetime import datetime
+from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
@@ -582,6 +584,7 @@ SCAN_EXCLUDE_DIRS = {
 DEVSECOPS_EXTRA_FILENAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml"}
 SCAN_EXCLUDE_FILE_SUFFIXES = (".bak", ".tmp", ".temp", ".old", ".orig", ".swp", ".swo", "~")
 DEFAULT_MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024
+RETRYABLE_STATUS_CODES = {502, 503, 504, 524}
 
 # ==========================================
 # 🚫 VULNÉRABILITÉS IMPOSSIBLES PAR LANGAGE
@@ -1418,6 +1421,11 @@ class StableEngine:
             max_retries = int(self.budget_plan.get("retries", 1))
         max_retries = max(1, int(max_retries))
         backoff_factor = float(self.budget_plan.get("retry_backoff_factor", 1.5))
+        retry_jitter_s = max(0.0, float(self.budget_plan.get("retry_jitter_s", 0.0)))
+        raw_retryable_codes = self.budget_plan.get("retryable_status_codes", sorted(RETRYABLE_STATUS_CODES))
+        retryable_status_codes = {int(code) for code in raw_retryable_codes if str(code).isdigit()}
+        if not retryable_status_codes:
+            retryable_status_codes = set(RETRYABLE_STATUS_CODES)
 
         llm_options = self._build_llm_options(
             max_output_tokens=max_output_tokens,
@@ -1432,8 +1440,19 @@ class StableEngine:
             error_reason = None
             try:
                 if attempt > 0:
-                    add_log(f"🔄 Retry {attempt+1}/{max_retries} pour {filename}", "warning")
-                    time.sleep(backoff_factor ** attempt)
+                    base_sleep = backoff_factor ** attempt
+                    jitter = random.uniform(0.0, retry_jitter_s) if retry_jitter_s > 0 else 0.0
+                    sleep_s = round(base_sleep + jitter, 3)
+                    add_log(
+                        f"🔄 Retry {attempt+1}/{max_retries} pour {filename} (sleep {sleep_s}s)",
+                        "warning",
+                        stage="analyze",
+                        event="llm_retry_wait",
+                        filename=filename,
+                        attempt=attempt + 1,
+                        sleep_s=sleep_s,
+                    )
+                    time.sleep(sleep_s)
                 
                 chunk_label = f" chunk {chunk_index}/{chunk_total}" if chunk_index and chunk_total else ""
                 add_log(
@@ -1478,14 +1497,39 @@ class StableEngine:
                         continue
                 else:
                     error_reason = f"http_{response.status_code}"
-                    add_log(f"❌ HTTP {response.status_code} pour {filename}", "error")
+                    retryable_http = response.status_code in retryable_status_codes
+                    add_log(
+                        f"❌ HTTP {response.status_code} pour {filename}{' (retryable)' if retryable_http else ''}",
+                        "warning" if retryable_http else "error",
+                        stage="analyze",
+                        event="llm_http_error",
+                        filename=filename,
+                        http_status=response.status_code,
+                        retryable=retryable_http,
+                    )
+                    if retryable_http and (attempt + 1) < max_retries:
+                        continue
+                    break
                     
             except requests.exceptions.Timeout:
                 error_reason = "timeout"
-                add_log(f"⏱️ Timeout ({timeout}s) pour {filename}", "warning")
+                add_log(
+                    f"⏱️ Timeout ({timeout}s) pour {filename}",
+                    "warning",
+                    stage="analyze",
+                    event="llm_timeout",
+                    filename=filename,
+                    timeout_s=timeout,
+                )
+                if (attempt + 1) < max_retries:
+                    continue
+                break
             except Exception as e:
                 error_reason = type(e).__name__
                 add_log(f"❌ Erreur: {str(e)[:100]}", "error")
+                if (attempt + 1) < max_retries:
+                    continue
+                break
             finally:
                 latency_ms = round((time.time() - request_start) * 1000, 2)
                 record_llm_call_metrics(
@@ -1756,6 +1800,107 @@ def is_excluded_scan_filename(filename: str) -> bool:
     return base.endswith(SCAN_EXCLUDE_FILE_SUFFIXES)
 
 
+def get_remote_latency_threshold_ms() -> int:
+    raw = os.getenv("NEXUS_REMOTE_LATENCY_THRESHOLD_MS", "700").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 700
+    return max(50, value)
+
+
+def is_local_ollama_base_url(base_url: str) -> bool:
+    try:
+        parsed = urlparse(str(base_url))
+        host = (parsed.hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def probe_ollama_latency_ms(base_url: str, timeout_s: float = 2.5) -> Optional[float]:
+    endpoint = f"{str(base_url).rstrip('/')}/api/tags"
+    started = time.time()
+    try:
+        response = requests.get(endpoint, timeout=max(0.5, float(timeout_s)))
+        if int(getattr(response, "status_code", 0)) >= 500:
+            return None
+        return round((time.time() - started) * 1000, 2)
+    except Exception:
+        return None
+
+
+def compute_remote_safe_policy(profile_key: str, mode_key: str, base_url: str) -> Dict[str, Any]:
+    latency_threshold_ms = get_remote_latency_threshold_ms()
+    local_base_url = is_local_ollama_base_url(base_url)
+    latency_ms = probe_ollama_latency_ms(base_url)
+    high_latency = latency_ms is not None and latency_ms > latency_threshold_ms
+    enabled = (not local_base_url) or high_latency
+
+    target_chunk_tokens_map = {
+        "eco": 2500,
+        "balanced": 3000,
+        "elite": 3600,
+        "titan": 4000,
+    }
+    chunk_timeout_map = {
+        "eco": 120,
+        "balanced": 150,
+        "elite": 180,
+        "titan": 210,
+    }
+    file_deadline_map = {
+        "eco": 180,
+        "balanced": 240,
+        "elite": 300,
+        "titan": 420,
+    }
+    min_retries_map = {
+        "eco": 2,
+        "balanced": 3,
+        "elite": 3,
+        "titan": 4,
+    }
+
+    base_target = int(target_chunk_tokens_map.get(profile_key, 3000))
+    mode_adjust = {"rapid": -250, "deep": 0, "devsecops": 200}.get(mode_key, 0)
+    target_chunk_tokens = max(2500, min(4000, base_target + mode_adjust))
+
+    reasons = []
+    if not local_base_url:
+        reasons.append("non_local_base_url")
+    if high_latency:
+        reasons.append("high_probe_latency")
+
+    return {
+        "enabled": bool(enabled),
+        "reasons": reasons,
+        "probe_latency_ms": latency_ms,
+        "latency_threshold_ms": latency_threshold_ms,
+        "target_chunk_tokens": target_chunk_tokens,
+        "chunk_timeout_s": int(chunk_timeout_map.get(profile_key, 150)),
+        "file_deadline_s": int(file_deadline_map.get(profile_key, 240)),
+        "min_retries": int(min_retries_map.get(profile_key, 3)),
+        "retry_backoff_factor": 1.85,
+        "retry_jitter_s": 0.65,
+    }
+
+
+def apply_remote_safe_budget_overrides(budget_plan: Dict[str, Any], remote_policy: Dict[str, Any]) -> Dict[str, Any]:
+    plan = dict(budget_plan or {})
+    if not remote_policy.get("enabled"):
+        plan.setdefault("retry_jitter_s", 0.0)
+        plan.setdefault("retryable_status_codes", sorted(RETRYABLE_STATUS_CODES))
+        return plan
+
+    plan["timeout_s"] = max(int(plan.get("timeout_s", 90)), int(remote_policy.get("chunk_timeout_s", 150)))
+    plan["retries"] = max(int(plan.get("retries", 1)), int(remote_policy.get("min_retries", 3)))
+    plan["retry_backoff_factor"] = max(float(plan.get("retry_backoff_factor", 1.5)), float(remote_policy.get("retry_backoff_factor", 1.85)))
+    plan["retry_jitter_s"] = max(float(plan.get("retry_jitter_s", 0.0)), float(remote_policy.get("retry_jitter_s", 0.65)))
+    plan["retryable_status_codes"] = sorted(RETRYABLE_STATUS_CODES)
+    return plan
+
+
 def should_scan_file(filename: str, resolved_mode_key: str, extensions: Tuple[str, ...]) -> bool:
     if is_excluded_scan_filename(filename):
         return False
@@ -1851,6 +1996,14 @@ def build_scan_preflight(
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
     resolved_mode_key = MODE_CONTROLLER.resolve_mode_key(mode_key=mode_key, mode_config=mode)
     resolved_ollama_base = get_ollama_base_url(ollama_mode=ollama_mode, ollama_url=ollama_url)
+    remote_policy = compute_remote_safe_policy(profile_key, resolved_mode_key, resolved_ollama_base)
+    effective_mode = dict(mode)
+    if remote_policy.get("enabled"):
+        effective_mode["target_chunk_tokens"] = int(remote_policy.get("target_chunk_tokens", 3000))
+        effective_mode["max_time_per_file"] = max(
+            int(mode.get("max_time_per_file", 60)),
+            int(remote_policy.get("file_deadline_s", 240)),
+        )
     llm_plan = BUDGET_CONTROLLER.compute_plan(
         profile_key=profile_key,
         mode_key=resolved_mode_key,
@@ -1858,6 +2011,7 @@ def build_scan_preflight(
         mode_config=mode,
         ollama_mode=ollama_mode,
     )
+    llm_plan = apply_remote_safe_budget_overrides(llm_plan, remote_policy)
 
     tmp_dir = None
     target_dir = target
@@ -1870,15 +2024,15 @@ def build_scan_preflight(
             target_dir = tmp_dir
             cloned_repo = True
 
-        collected = collect_scan_candidates(target_dir, resolved_mode_key, mode)
+        collected = collect_scan_candidates(target_dir, resolved_mode_key, effective_mode)
         scheduled_size_map = {
             entry["path"]: collected["file_sizes"].get(entry["path"], 0)
             for entry in collected["file_entries"]
             if entry.get("path")
         }
 
-        chunk_budget = compute_chunk_token_budget(profile, mode)
-        max_chunks = resolve_max_chunks(mode)
+        chunk_budget = compute_chunk_token_budget(profile, effective_mode)
+        max_chunks = resolve_max_chunks(effective_mode)
         tokens_estimated, chunks_estimated = _estimate_tokens_and_chunks(
             scheduled_size_map,
             chunk_budget_tokens=chunk_budget,
@@ -1888,7 +2042,7 @@ def build_scan_preflight(
         context_factor = float(llm_plan.get("max_context_tokens", 8192)) / 8192.0
         output_factor = float(llm_plan.get("max_output_tokens", 1024)) / 1024.0
         mode_factor = {"rapid": 0.78, "deep": 1.0, "devsecops": 1.18}.get(resolved_mode_key, 1.0)
-        remote_factor = 1.32 if ollama_mode == "remote" else 1.0
+        remote_factor = 1.32 if ollama_mode == "remote" or remote_policy.get("enabled") else 1.0
         pass_factor = max(1, int(llm_plan.get("analysis_passes", 1)))
         per_chunk_seconds = (1.7 + (context_factor * 0.65) + (output_factor * 0.35)) * mode_factor * remote_factor
         per_chunk_seconds = max(1.0, min(per_chunk_seconds, float(llm_plan.get("timeout_s", 90)) * 0.75))
@@ -1936,12 +2090,21 @@ def build_scan_preflight(
                 "concurrency": llm_plan.get("concurrency"),
                 "analysis_passes": llm_plan.get("analysis_passes"),
                 "timeout_s": llm_plan.get("timeout_s"),
+                "retries": llm_plan.get("retries"),
             },
             "chunking": {
                 "chunk_token_budget": chunk_budget,
                 "max_chunks_per_file": max_chunks,
                 "tokens_estimated_total": tokens_estimated,
                 "chunks_estimated_total": chunks_estimated,
+                "target_chunk_tokens": remote_policy.get("target_chunk_tokens") if remote_policy.get("enabled") else None,
+            },
+            "remote_safe": {
+                "enabled": bool(remote_policy.get("enabled")),
+                "reasons": list(remote_policy.get("reasons", [])),
+                "probe_latency_ms": remote_policy.get("probe_latency_ms"),
+                "latency_threshold_ms": remote_policy.get("latency_threshold_ms"),
+                "file_deadline_s": remote_policy.get("file_deadline_s"),
             },
             "eta": {
                 "seconds": eta_seconds,
@@ -1985,6 +2148,15 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         mode_config=mode,
         ollama_mode=ollama_mode,
     )
+    remote_policy = compute_remote_safe_policy(profile_key, resolved_mode_key, base_url)
+    budget_plan = apply_remote_safe_budget_overrides(budget_plan, remote_policy)
+    effective_mode = dict(mode)
+    if remote_policy.get("enabled"):
+        effective_mode["target_chunk_tokens"] = int(remote_policy.get("target_chunk_tokens", 3000))
+        effective_mode["max_time_per_file"] = max(
+            int(mode.get("max_time_per_file", 60)),
+            int(remote_policy.get("file_deadline_s", 240)),
+        )
 
     scan_state.update({
         "id": scan_id,
@@ -2006,11 +2178,12 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         "profile": profile_key,
         "mode": mode_key,
         "budget_info": {
-            "max_files": mode["max_files"],
-            "max_time_per_file": mode["max_time_per_file"],
-            "min_severity": mode["min_severity"],
-            "min_confidence": mode["min_confidence"],
+            "max_files": effective_mode["max_files"],
+            "max_time_per_file": effective_mode["max_time_per_file"],
+            "min_severity": effective_mode["min_severity"],
+            "min_confidence": effective_mode["min_confidence"],
             "llm_budget": budget_plan,
+            "remote_safe": remote_policy,
         },
         "preflight": {},
         "telemetry": init_scan_telemetry()
@@ -2036,13 +2209,13 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         mode=resolved_mode_key,
     )
     add_log(
-        f"🎯 Budget: max {mode['max_files'] or '∞'} fichiers, sévérité ≥ {mode['min_severity']}",
+        f"🎯 Budget: max {effective_mode['max_files'] or '∞'} fichiers, sévérité ≥ {effective_mode['min_severity']}",
         "info",
         stage="normalize",
         event="scan_budget",
-        max_files=mode["max_files"],
-        min_severity=mode["min_severity"],
-        min_confidence=mode["min_confidence"],
+        max_files=effective_mode["max_files"],
+        min_severity=effective_mode["min_severity"],
+        min_confidence=effective_mode["min_confidence"],
     )
     add_log(
         f"🧮 LLM plan: ctx={budget_plan['max_context_tokens']} out={budget_plan['max_output_tokens']} "
@@ -2053,6 +2226,27 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         event="llm_budget_plan",
         llm_budget_plan=budget_plan,
     )
+    if remote_policy.get("enabled"):
+        add_log(
+            f"🌐 Remote-safe ON: chunk~{remote_policy.get('target_chunk_tokens')} tokens, timeout {budget_plan.get('timeout_s')}s, deadline fichier {effective_mode.get('max_time_per_file')}s",
+            "warning",
+            stage="normalize",
+            event="remote_safe_enabled",
+            reasons=remote_policy.get("reasons", []),
+            probe_latency_ms=remote_policy.get("probe_latency_ms"),
+            latency_threshold_ms=remote_policy.get("latency_threshold_ms"),
+            base_url=base_url,
+        )
+    else:
+        add_log(
+            "🏠 Remote-safe OFF (local low-latency endpoint)",
+            "info",
+            stage="normalize",
+            event="remote_safe_disabled",
+            probe_latency_ms=remote_policy.get("probe_latency_ms"),
+            latency_threshold_ms=remote_policy.get("latency_threshold_ms"),
+            base_url=base_url,
+        )
     add_log(
         f"🧭 Mode strategy: {resolved_mode_key}",
         "info",
@@ -2102,7 +2296,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "index")
         
         telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
-        collection = collect_scan_candidates(target_dir, resolved_mode_key, mode)
+        collection = collect_scan_candidates(target_dir, resolved_mode_key, effective_mode)
         file_entries = collection["file_entries"]
         discovered_count = collection["files_discovered"]
         telemetry["files_discovered"] = discovered_count
@@ -2128,7 +2322,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
 
         if collection["files_skipped"] > 0:
             skipped_count = collection["files_skipped"]
-            max_files = mode["max_files"]
+            max_files = effective_mode["max_files"]
             add_log(
                 f"✂️ Limite mode {mode_key}: {discovered_count} → {max_files} fichiers",
                 "info",
@@ -2178,7 +2372,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
 
         engine = StableEngine(
             profile,
-            mode,
+            effective_mode,
             budget_plan=budget_plan,
             ollama_base_url=base_url,
             profile_name=profile_key,
@@ -2229,7 +2423,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             if resolved_mode_key == "deep" and vulns:
                 cross_file_hints = MODE_CONTROLLER.update_cross_file_hints(cross_file_hints, filename, vulns)
             
-            max_time = mode["max_time_per_file"]
+            max_time = effective_mode["max_time_per_file"]
             if file_duration > max_time:
                 add_log(f"⏱️ {filename}: {file_duration:.0f}s (budget: {max_time}s)", "warning")
             

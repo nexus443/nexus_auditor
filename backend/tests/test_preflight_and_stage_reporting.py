@@ -135,6 +135,46 @@ class PreflightAndStageReportingTests(unittest.TestCase):
             self.assertGreaterEqual(devsecops["files_discovered"], 2)
             self.assertGreaterEqual(devsecops["files_scheduled"], 2)
 
+    def test_collect_scan_candidates_excludes_backup_tmp_and_oversized_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_env = os.environ.get("NEXUS_MAX_SCAN_FILE_BYTES")
+            os.environ["NEXUS_MAX_SCAN_FILE_BYTES"] = "128"
+            try:
+                os.makedirs(os.path.join(tmp_dir, "src"), exist_ok=True)
+                os.makedirs(os.path.join(tmp_dir, "vendor"), exist_ok=True)
+                os.makedirs(os.path.join(tmp_dir, ".cache"), exist_ok=True)
+
+                with open(os.path.join(tmp_dir, "src", "ok.py"), "w", encoding="utf-8") as f:
+                    f.write("def ok():\n    return 1\n")
+                with open(os.path.join(tmp_dir, "src", "service.backup.py"), "w", encoding="utf-8") as f:
+                    f.write("def backup_copy():\n    return 1\n")
+                with open(os.path.join(tmp_dir, "src", "draft.tmp"), "w", encoding="utf-8") as f:
+                    f.write("temporary\n")
+                with open(os.path.join(tmp_dir, "src", "huge.py"), "w", encoding="utf-8") as f:
+                    f.write("x" * 512)
+                with open(os.path.join(tmp_dir, "vendor", "vendored.py"), "w", encoding="utf-8") as f:
+                    f.write("def vendored():\n    pass\n")
+                with open(os.path.join(tmp_dir, ".cache", "cache.py"), "w", encoding="utf-8") as f:
+                    f.write("def cached():\n    pass\n")
+
+                result = backend_module.collect_scan_candidates(tmp_dir, "deep", backend_module.SCAN_MODES["deep"])
+            finally:
+                if original_env is None:
+                    os.environ.pop("NEXUS_MAX_SCAN_FILE_BYTES", None)
+                else:
+                    os.environ["NEXUS_MAX_SCAN_FILE_BYTES"] = original_env
+
+            scheduled_paths = {entry["path"] for entry in result["file_entries"]}
+            self.assertIn(os.path.join(tmp_dir, "src", "ok.py"), scheduled_paths)
+            self.assertNotIn(os.path.join(tmp_dir, "src", "service.backup.py"), scheduled_paths)
+            self.assertNotIn(os.path.join(tmp_dir, "src", "draft.tmp"), scheduled_paths)
+            self.assertNotIn(os.path.join(tmp_dir, "src", "huge.py"), scheduled_paths)
+            self.assertNotIn(os.path.join(tmp_dir, "vendor", "vendored.py"), scheduled_paths)
+            self.assertNotIn(os.path.join(tmp_dir, ".cache", "cache.py"), scheduled_paths)
+            self.assertGreaterEqual(result.get("excluded_policy_files", 0), 2)
+            self.assertGreaterEqual(result.get("excluded_oversized_files", 0), 1)
+            self.assertEqual(result.get("max_file_size_bytes"), 128)
+
     def test_build_scan_preflight_returns_eta_and_stage_breakdown(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             os.makedirs(os.path.join(tmp_dir, "service"), exist_ok=True)

@@ -574,8 +574,14 @@ BUILD_TIME_FILES = {
     '.prettierrc',
 }
 
-SCAN_EXCLUDE_DIRS = {'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv', 'audit_logs', 'reports', 'coverage'}
+SCAN_EXCLUDE_DIRS = {
+    'node_modules', '.git', 'venv', 'dist', 'build', '__pycache__', '.venv',
+    'audit_logs', 'reports', 'coverage', 'vendor', 'cache', '.cache',
+    '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.nox',
+}
 DEVSECOPS_EXTRA_FILENAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml"}
+SCAN_EXCLUDE_FILE_SUFFIXES = (".bak", ".tmp", ".temp", ".old", ".orig", ".swp", ".swo", "~")
+DEFAULT_MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024
 
 # ==========================================
 # 🚫 VULNÉRABILITÉS IMPOSSIBLES PAR LANGAGE
@@ -1732,7 +1738,27 @@ def format_bytes(value: int) -> str:
     return f"{size:.{precision}f} {units[idx]}"
 
 
+def get_max_scan_file_bytes() -> int:
+    raw = os.getenv("NEXUS_MAX_SCAN_FILE_BYTES", str(DEFAULT_MAX_SCAN_FILE_BYTES)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = DEFAULT_MAX_SCAN_FILE_BYTES
+    return max(0, value)
+
+
+def is_excluded_scan_filename(filename: str) -> bool:
+    base = os.path.basename(filename).strip().lower()
+    if not base:
+        return True
+    if "backup" in base:
+        return True
+    return base.endswith(SCAN_EXCLUDE_FILE_SUFFIXES)
+
+
 def should_scan_file(filename: str, resolved_mode_key: str, extensions: Tuple[str, ...]) -> bool:
+    if is_excluded_scan_filename(filename):
+        return False
     if resolved_mode_key in ("rapid", "deep") and filename in BUILD_TIME_FILES:
         return False
     if filename.endswith(extensions):
@@ -1746,18 +1772,29 @@ def collect_scan_candidates(target_dir: str, resolved_mode_key: str, mode_config
     extensions = tuple(mode_config.get("file_extensions") or ())
     discovered_files: List[str] = []
     file_sizes: Dict[str, int] = {}
+    max_file_size_bytes = get_max_scan_file_bytes()
+    excluded_policy_files = 0
+    excluded_oversized_files = 0
 
     for root, dirs, filenames in os.walk(target_dir):
         dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDE_DIRS]
         for filename in filenames:
+            if is_excluded_scan_filename(filename):
+                excluded_policy_files += 1
+                continue
             if not should_scan_file(filename, resolved_mode_key, extensions):
                 continue
             full_path = os.path.join(root, filename)
-            discovered_files.append(full_path)
+            file_size = 0
             try:
-                file_sizes[full_path] = max(0, int(os.path.getsize(full_path)))
+                file_size = max(0, int(os.path.getsize(full_path)))
             except OSError:
-                file_sizes[full_path] = 0
+                file_size = 0
+            if max_file_size_bytes > 0 and file_size > max_file_size_bytes:
+                excluded_oversized_files += 1
+                continue
+            discovered_files.append(full_path)
+            file_sizes[full_path] = file_size
 
     prioritized_entries = MODE_CONTROLLER.prioritize_files(discovered_files, resolved_mode_key)
     files_discovered = len(prioritized_entries)
@@ -1778,6 +1815,9 @@ def collect_scan_candidates(target_dir: str, resolved_mode_key: str, mode_config
         "files_discovered": files_discovered,
         "files_scheduled": len(prioritized_entries),
         "files_skipped": files_skipped,
+        "excluded_policy_files": excluded_policy_files,
+        "excluded_oversized_files": excluded_oversized_files,
+        "max_file_size_bytes": max_file_size_bytes,
         "bytes_discovered": bytes_discovered,
         "bytes_scheduled": bytes_scheduled,
     }
@@ -1880,10 +1920,13 @@ def build_scan_preflight(
                 "discovered": collected["files_discovered"],
                 "scheduled": collected["files_scheduled"],
                 "skipped": collected["files_skipped"],
+                "excluded_policy": collected.get("excluded_policy_files", 0),
+                "excluded_oversized": collected.get("excluded_oversized_files", 0),
             },
             "size": {
                 "discovered_bytes": collected["bytes_discovered"],
                 "scheduled_bytes": collected["bytes_scheduled"],
+                "max_file_size_bytes": collected.get("max_file_size_bytes", get_max_scan_file_bytes()),
                 "discovered_human": format_bytes(collected["bytes_discovered"]),
                 "scheduled_human": format_bytes(collected["bytes_scheduled"]),
             },
@@ -2067,6 +2110,21 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         telemetry["bytes_scheduled"] = collection["bytes_scheduled"]
         telemetry["mode_strategy"] = resolved_mode_key
         telemetry["hotspot_files_discovered"] = sum(1 for entry in file_entries if entry.get("score", 0) > 0 and entry.get("reasons"))
+        telemetry["files_excluded_policy"] = collection.get("excluded_policy_files", 0)
+        telemetry["files_excluded_oversized"] = collection.get("excluded_oversized_files", 0)
+
+        excluded_policy = int(collection.get("excluded_policy_files", 0))
+        excluded_oversized = int(collection.get("excluded_oversized_files", 0))
+        if excluded_policy or excluded_oversized:
+            add_log(
+                f"🧹 Exclusions: policy={excluded_policy}, oversized={excluded_oversized}",
+                "info",
+                stage="index",
+                event="file_exclusions",
+                excluded_policy=excluded_policy,
+                excluded_oversized=excluded_oversized,
+                max_file_size_bytes=collection.get("max_file_size_bytes"),
+            )
 
         if collection["files_skipped"] > 0:
             skipped_count = collection["files_skipped"]
@@ -2091,6 +2149,9 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             "files_discovered": discovered_count,
             "files_scheduled": total_files,
             "files_skipped": scan_state["stats"]["skipped"],
+            "files_excluded_policy": excluded_policy,
+            "files_excluded_oversized": excluded_oversized,
+            "max_file_size_bytes": collection.get("max_file_size_bytes"),
             "bytes_scheduled": collection["bytes_scheduled"],
             "mode_strategy": resolved_mode_key,
         }

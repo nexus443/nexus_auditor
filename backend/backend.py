@@ -58,6 +58,7 @@ LATEST_SCAN_POINTER_FILE = os.path.join(SCAN_STATE_DIR, "latest_scan_id.txt")
 RAW_RESPONSES_DIR = "./audit_logs/raw_responses"
 PATCHES_DIR = "./audit_logs/patches"
 SCAN_STORE_LOCK = threading.Lock()
+HISTORY_LOCK = threading.Lock()
 
 os.makedirs(SCAN_STATE_DIR, exist_ok=True)
 os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
@@ -737,8 +738,10 @@ def _coerce_scan_state(state: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
-def _atomic_write_json(path: str, payload: Dict[str, Any]):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def _atomic_write_json(path: str, payload: Any):
+    dir_path = os.path.dirname(path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
     tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -858,19 +861,18 @@ def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] 
     persist_scan_state(scan_state)
 
 def save_to_history(summary):
-    history = []
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r') as f: 
-                history = json.load(f)
-        except: 
-            pass
-    
-    history.insert(0, summary)
-    history = history[:50]
-    
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump(history, f, indent=2)
+    with HISTORY_LOCK:
+        history = []
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+
+        history.insert(0, summary)
+        history = history[:50]
+        _atomic_write_json(HISTORY_FILE, history)
 
 def save_raw_response(filename: str, response_text: str):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

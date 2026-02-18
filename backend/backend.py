@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import html
 import re
 import math
 import random
@@ -2729,22 +2730,36 @@ async def export_report_html():
     for v in scan_state["vulnerabilities"]:
         color = "red" if v['severity'] == 'Critical' else "orange" if v['severity'] == 'High' else "blue"
         conf_color = "green" if v['confidence'] >= 70 else "orange" if v['confidence'] >= 40 else "red"
+        safe_severity = html.escape(str(v.get("severity", "Unknown")))
+        safe_title = html.escape(str(v.get("title", "")))
+        safe_confidence = html.escape(str(v.get("confidence", 0)))
+        safe_file = html.escape(str(v.get("file", "N/A")))
+        safe_line = html.escape(str(v.get("line") or "N/A"))
+        safe_description = html.escape(str(v.get("description", "")))
+        safe_snippet = html.escape(str(v.get("snippet", "")))
+        safe_fix = html.escape(str(v.get("fix", "")))
         
         vulns_html += f"""
-        <div class="vuln-card {v['severity']}">
+        <div class="vuln-card {safe_severity}">
             <h3>
-                <span class="badge {color}">{v['severity']}</span> 
-                {v['title']}
-                <span class="confidence {conf_color}">Confiance: {v['confidence']}%</span>
+                <span class="badge {color}">{safe_severity}</span> 
+                {safe_title}
+                <span class="confidence {conf_color}">Confiance: {safe_confidence}%</span>
             </h3>
-            <div class="meta">Fichier: <strong>{v['file']}</strong> | Ligne: {v['line'] or 'N/A'}</div>
-            <p>{v['description']}</p>
-            <div class="code-block"><pre>{v['snippet']}</pre></div>
-            <div class="fix-block"><strong>Correction:</strong><pre>{v['fix']}</pre></div>
+            <div class="meta">Fichier: <strong>{safe_file}</strong> | Ligne: {safe_line}</div>
+            <p>{safe_description}</p>
+            <div class="code-block"><pre>{safe_snippet}</pre></div>
+            <div class="fix-block"><strong>Correction:</strong><pre>{safe_fix}</pre></div>
         </div>
         """
-        
-    html = f"""
+    safe_scan_id = html.escape(str(scan_state.get("id", "N/A")))
+    safe_profile = html.escape(str(scan_state.get("profile", "N/A")))
+    safe_mode = html.escape(str(scan_state.get("mode", "N/A")))
+    safe_critical = html.escape(str(scan_state["stats"].get("critical", 0)))
+    safe_high = html.escape(str(scan_state["stats"].get("high", 0)))
+    safe_conf_score = html.escape(str(scan_state.get("confidence_score", 0.0)))
+
+    html_doc = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -2773,13 +2788,13 @@ async def export_report_html():
             <div>
                 <h1>🛡️ Nexus Auditor V3.0 Stable Report</h1>
                 <p>Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
-                <p>Scan ID: {scan_state.get('id', 'N/A')}</p>
-                <p>Profil: {scan_state.get('profile', 'N/A')} | Mode: {scan_state.get('mode', 'N/A')}</p>
+                <p>Scan ID: {safe_scan_id}</p>
+                <p>Profil: {safe_profile} | Mode: {safe_mode}</p>
             </div>
             <div style="text-align: right;">
-                <p><strong>Critical:</strong> {scan_state['stats']['critical']}</p>
-                <p><strong>High:</strong> {scan_state['stats']['high']}</p>
-                <p><strong>Confiance:</strong> {scan_state['confidence_score']}%</p>
+                <p><strong>Critical:</strong> {safe_critical}</p>
+                <p><strong>High:</strong> {safe_high}</p>
+                <p><strong>Confiance:</strong> {safe_conf_score}%</p>
             </div>
         </div>
         
@@ -2788,7 +2803,7 @@ async def export_report_html():
     </body>
     </html>
     """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html_doc)
 
 # ==========================================
 # 🚀 MAIN

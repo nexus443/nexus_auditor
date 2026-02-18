@@ -16,7 +16,7 @@ import signal
 from datetime import datetime
 from collections import deque
 from urllib.parse import urlparse
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -704,7 +704,7 @@ class ScanRequest(BaseModel):
     ollama_url: Optional[str] = None
 
 class FixRequest(BaseModel):
-    vuln_id: int
+    vuln_id: Union[int, str]
 
 # ==========================================
 # 🛠️ UTILITAIRES
@@ -859,6 +859,13 @@ def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] 
         scan_state["logs"] = logs
     logs.append({"msg": safe_msg, "type": type, "time": ts, "stage": current_stage, "event": event or "log"})
     persist_scan_state(scan_state)
+
+
+def normalize_vuln_id(raw_id: Union[int, str]) -> Union[int, str]:
+    if isinstance(raw_id, int):
+        return raw_id
+    text = str(raw_id).strip()
+    return int(text) if text.isdigit() else text
 
 def save_to_history(summary):
     with HISTORY_LOCK:
@@ -3053,7 +3060,14 @@ async def export_json(scan_id: Optional[str] = None):
 @app.post("/fix/generate")
 async def generate_fix(request: FixRequest, scan_id: Optional[str] = None):
     state = load_scan_state_or_latest(scan_id)
-    vuln = next((v for v in state.get("vulnerabilities", []) if v.get("id") == request.vuln_id), None)
+    requested_id = normalize_vuln_id(request.vuln_id)
+    vuln = next(
+        (
+            v for v in state.get("vulnerabilities", [])
+            if v.get("id") == requested_id or str(v.get("id")) == str(requested_id)
+        ),
+        None,
+    )
     if not vuln:
         raise HTTPException(status_code=404, detail="Vulnérabilité non trouvée")
     

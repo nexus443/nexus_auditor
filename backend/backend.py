@@ -5,6 +5,7 @@ import html
 import re
 import math
 import random
+import threading
 import requests
 import shutil
 import tempfile
@@ -13,6 +14,7 @@ import uuid
 import difflib
 import signal
 from datetime import datetime
+from collections import deque
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -51,9 +53,13 @@ except ImportError:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_BASE_URL = OLLAMA_URL.replace("/api/generate", "")  # Pour les autres endpoints
 HISTORY_FILE = "audit_history.json"
+SCAN_STATE_DIR = "./audit_logs"
+LATEST_SCAN_POINTER_FILE = os.path.join(SCAN_STATE_DIR, "latest_scan_id.txt")
 RAW_RESPONSES_DIR = "./audit_logs/raw_responses"
 PATCHES_DIR = "./audit_logs/patches"
+SCAN_STORE_LOCK = threading.Lock()
 
+os.makedirs(SCAN_STATE_DIR, exist_ok=True)
 os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
 os.makedirs(PATCHES_DIR, exist_ok=True)
 
@@ -100,6 +106,7 @@ def mark_stage_terminal_state(terminal_state: str):
         report["completed"] = list(PIPELINE_STAGES)
         report["current_index"] = len(PIPELINE_STAGES)
     report["updated_at"] = datetime.now().isoformat()
+    persist_scan_state(scan_state)
 
 
 def init_scan_telemetry() -> dict:
@@ -200,6 +207,7 @@ def start_scan_stage(stage_name: str) -> float:
     report["current_index"] = _pipeline_stage_index(stage_name)
     report["terminal_state"] = None
     report["updated_at"] = datetime.now().isoformat()
+    persist_scan_state(scan_state)
     add_log(f"▶ Stage {stage_name}", "info", stage=stage_name, event="stage_start")
     return time.time()
 
@@ -222,6 +230,7 @@ def end_scan_stage(stage_name: str, started_at: Optional[float]):
         completed.append(stage_name)
         completed.sort(key=lambda item: PIPELINE_STAGES.index(item))
     report["updated_at"] = datetime.now().isoformat()
+    persist_scan_state(scan_state)
     add_log(
         f"✅ Stage {stage_name} terminé ({elapsed_ms:.0f}ms)",
         "info",
@@ -644,29 +653,36 @@ app.add_middleware(
 # 📊 ÉTAT GLOBAL
 # ==========================================
 
-scan_state = {
-    "id": None,
-    "is_scanning": False,
-    "start_time": None,
-    "current_stage": "idle",
-    "stage_report": init_stage_report("idle"),
-    "progress": 0,
-    "current_file": "",
-    "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
-    "logs": [],
-    "vulnerabilities": [],
-    "should_stop": False,
-    "estimated_time": "Calcul...",
-    "confidence_score": 0.0,
-    "failed_analyses": 0,
-    "successful_analyses": 0,
-    "target_dir": None,
-    "profile": None,
-    "mode": None,
-    "budget_info": {},
-    "preflight": {},
-    "telemetry": init_scan_telemetry()
-}
+LOGS_MAXLEN = 500
+
+
+def new_scan_state() -> Dict[str, Any]:
+    return {
+        "id": None,
+        "is_scanning": False,
+        "start_time": None,
+        "current_stage": "idle",
+        "stage_report": init_stage_report("idle"),
+        "progress": 0,
+        "current_file": "",
+        "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
+        "logs": deque(maxlen=LOGS_MAXLEN),
+        "vulnerabilities": [],
+        "should_stop": False,
+        "estimated_time": "Calcul...",
+        "confidence_score": 0.0,
+        "failed_analyses": 0,
+        "successful_analyses": 0,
+        "target_dir": None,
+        "profile": None,
+        "mode": None,
+        "budget_info": {},
+        "preflight": {},
+        "telemetry": init_scan_telemetry(),
+    }
+
+
+scan_state = new_scan_state()
 
 class ScanRequest(BaseModel):
     target: str
@@ -682,6 +698,126 @@ class FixRequest(BaseModel):
 # ==========================================
 # 🛠️ UTILITAIRES
 # ==========================================
+
+
+def _scan_state_file_path(scan_id: str) -> str:
+    safe_scan_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(scan_id))
+    return os.path.join(SCAN_STATE_DIR, f"scan_{safe_scan_id}.json")
+
+
+def _serializable_scan_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(state or {})
+    logs = payload.get("logs", [])
+    if isinstance(logs, deque):
+        payload["logs"] = list(logs)
+    elif not isinstance(logs, list):
+        payload["logs"] = list(logs) if logs else []
+    payload["updated_at"] = datetime.now().isoformat()
+    return payload
+
+
+def _coerce_scan_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    merged = new_scan_state()
+    merged.update(state or {})
+    merged["logs"] = deque(merged.get("logs") or [], maxlen=LOGS_MAXLEN)
+    if not isinstance(merged.get("telemetry"), dict):
+        merged["telemetry"] = init_scan_telemetry()
+    if not isinstance(merged.get("stage_report"), dict):
+        merged["stage_report"] = init_stage_report(merged.get("current_stage", "idle"))
+    return merged
+
+
+def _atomic_write_json(path: str, payload: Dict[str, Any]):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def _atomic_write_text(path: str, value: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(value)
+    os.replace(tmp_path, path)
+
+
+def set_latest_scan_id(scan_id: Optional[str]):
+    if not scan_id:
+        return
+    with SCAN_STORE_LOCK:
+        _atomic_write_text(LATEST_SCAN_POINTER_FILE, str(scan_id).strip())
+
+
+def get_latest_scan_id() -> Optional[str]:
+    with SCAN_STORE_LOCK:
+        if os.path.exists(LATEST_SCAN_POINTER_FILE):
+            try:
+                with open(LATEST_SCAN_POINTER_FILE, "r", encoding="utf-8") as f:
+                    value = f.read().strip()
+                    if value:
+                        return value
+            except Exception:
+                pass
+
+        try:
+            scan_files = [
+                f for f in os.listdir(SCAN_STATE_DIR)
+                if f.startswith("scan_") and f.endswith(".json")
+            ]
+        except Exception:
+            scan_files = []
+        if not scan_files:
+            return None
+        latest_file = max(
+            scan_files,
+            key=lambda name: os.path.getmtime(os.path.join(SCAN_STATE_DIR, name))
+        )
+        return latest_file[len("scan_") : -len(".json")]
+
+
+def persist_scan_state(state: Dict[str, Any]):
+    scan_id = (state or {}).get("id")
+    if not scan_id:
+        return
+    payload = _serializable_scan_state(state)
+    state_file = _scan_state_file_path(scan_id)
+    with SCAN_STORE_LOCK:
+        _atomic_write_json(state_file, payload)
+        _atomic_write_text(LATEST_SCAN_POINTER_FILE, str(scan_id).strip())
+
+
+def load_scan_state_from_disk(scan_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not scan_id:
+        return None
+    state_file = _scan_state_file_path(scan_id)
+    with SCAN_STORE_LOCK:
+        if not os.path.exists(state_file):
+            return None
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+    return _coerce_scan_state(data)
+
+
+def resolve_scan_id(scan_id: Optional[str] = None) -> Optional[str]:
+    if scan_id:
+        return str(scan_id)
+    if scan_state.get("id"):
+        return str(scan_state.get("id"))
+    return get_latest_scan_id()
+
+
+def load_scan_state_or_latest(scan_id: Optional[str] = None) -> Dict[str, Any]:
+    resolved = resolve_scan_id(scan_id)
+    if resolved:
+        loaded = load_scan_state_from_disk(resolved)
+        if loaded:
+            return loaded
+    return _coerce_scan_state(scan_state)
 
 def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] = None, **fields):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -704,9 +840,12 @@ def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] 
     else:
         print(f"[{ts}] [{type.upper()}] [{current_stage}] {safe_msg}")
 
-    if len(scan_state["logs"]) > 500: 
-        scan_state["logs"].pop(0)
-    scan_state["logs"].append({"msg": safe_msg, "type": type, "time": ts, "stage": current_stage, "event": event or "log"})
+    logs = scan_state.get("logs")
+    if not isinstance(logs, deque):
+        logs = deque(logs or [], maxlen=LOGS_MAXLEN)
+        scan_state["logs"] = logs
+    logs.append({"msg": safe_msg, "type": type, "time": ts, "stage": current_stage, "event": event or "log"})
+    persist_scan_state(scan_state)
 
 def save_to_history(summary):
     history = []
@@ -2181,9 +2320,16 @@ def build_scan_preflight(
 # 🚀 ORCHESTRATION DU SCAN
 # ==========================================
 
-def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "auto", ollama_url: Optional[str] = None):
+def run_scan(
+    target: str,
+    profile_key: str,
+    mode_key: str,
+    ollama_mode: str = "auto",
+    ollama_url: Optional[str] = None,
+    scan_id: Optional[str] = None,
+):
     """Orchestration principale du scan"""
-    scan_id = str(uuid.uuid4())[:8]
+    scan_id = str(scan_id or str(uuid.uuid4())[:8]).strip()
 
     current_stage = None
     stage_started_at = None
@@ -2227,7 +2373,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         "progress": 0,
         "current_file": "",
         "stats": {"critical": 0, "high": 0, "medium": 0, "low": 0, "files": 0, "skipped": 0},
-        "logs": [],
+        "logs": deque(maxlen=LOGS_MAXLEN),
         "vulnerabilities": [],
         "should_stop": False,
         "estimated_time": "Calcul...",
@@ -2248,6 +2394,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
         "preflight": {},
         "telemetry": init_scan_telemetry()
     })
+    persist_scan_state(scan_state)
 
     current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "normalize")
 
@@ -2565,6 +2712,7 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
             end_scan_stage(current_stage, stage_started_at)
             current_stage, stage_started_at = None, None
         scan_state["is_scanning"] = False
+        persist_scan_state(scan_state)
         # V3.0: Cleanup tmp_dir si clone Git
         if tmp_dir and os.path.exists(tmp_dir):
             try:
@@ -2596,17 +2744,41 @@ async def get_modes():
 
 @app.post("/scan/start")
 async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
-    if scan_state["is_scanning"]:
-        return {"success": False, "msg": "Scan en cours"}
+    latest_state = load_scan_state_or_latest()
+    if latest_state.get("is_scanning"):
+        return {"success": False, "msg": "Scan en cours", "scan_id": latest_state.get("id")}
+
+    new_scan_id = str(uuid.uuid4())[:8]
+    started_state = new_scan_state()
+    started_state.update({
+        "id": new_scan_id,
+        "is_scanning": True,
+        "start_time": time.time(),
+        "current_stage": "normalize",
+        "stage_report": init_stage_report("normalize"),
+        "target_dir": request.target,
+        "profile": request.profile,
+        "mode": request.mode,
+    })
+    scan_state.clear()
+    scan_state.update(started_state)
+    persist_scan_state(scan_state)
+
     background_tasks.add_task(
         run_scan, 
         request.target, 
         request.profile, 
         request.mode,
         request.ollama_mode,  # V2.5: Mode de connexion Ollama
-        request.ollama_url    # V2.5: URL custom si remote
+        request.ollama_url,   # V2.5: URL custom si remote
+        new_scan_id,
     )
-    return {"success": True, "msg": f"Scan lancé (profil: {request.profile}, mode: {request.mode})"}
+    return {
+        "success": True,
+        "msg": f"Scan lancé (profil: {request.profile}, mode: {request.mode})",
+        "scan_id": new_scan_id,
+        "status": "started",
+    }
 
 
 @app.post("/scan/preflight")
@@ -2677,24 +2849,42 @@ async def test_ollama(request: dict):
 
 
 @app.post("/scan/stop")
-async def stop_scan():
+async def stop_scan(scan_id: Optional[str] = None):
     """Arrête le scan en cours"""
-    scan_state["should_stop"] = True
-    scan_state["is_scanning"] = False
-    scan_state["current_stage"] = "stopped"
-    mark_stage_terminal_state("stopped")
-    add_log("🛑 Arrêt demandé par l'utilisateur", "warning")
-    return {"success": True, "message": "Scan stopping..."}
+    resolved_scan_id = resolve_scan_id(scan_id)
+    if not resolved_scan_id:
+        return {"success": False, "message": "Aucun scan trouvé", "scan_id": None}
+
+    target_state = load_scan_state_or_latest(resolved_scan_id)
+    target_state["should_stop"] = True
+    target_state["is_scanning"] = False
+    target_state["current_stage"] = "stopped"
+    stage_report = target_state.setdefault("stage_report", init_stage_report("stopped"))
+    stage_report["terminal_state"] = "stopped"
+    stage_report["current"] = "stopped"
+    stage_report["updated_at"] = datetime.now().isoformat()
+    persist_scan_state(target_state)
+
+    if scan_state.get("id") == resolved_scan_id:
+        scan_state["should_stop"] = True
+        scan_state["is_scanning"] = False
+        scan_state["current_stage"] = "stopped"
+        mark_stage_terminal_state("stopped")
+        add_log("🛑 Arrêt demandé par l'utilisateur", "warning")
+
+    return {"success": True, "message": "Scan stopping...", "scan_id": resolved_scan_id}
 
 @app.get("/scan/stages")
-async def get_scan_stages():
-    return scan_state.get("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+async def get_scan_stages(scan_id: Optional[str] = None):
+    state = load_scan_state_or_latest(scan_id)
+    return state.get("stage_report", init_stage_report(state.get("current_stage", "idle")))
 
 @app.get("/scan/status")
-async def get_status():
-    if "stage_report" not in scan_state:
-        scan_state["stage_report"] = init_stage_report(scan_state.get("current_stage", "idle"))
-    return scan_state
+async def get_status(scan_id: Optional[str] = None):
+    state = load_scan_state_or_latest(scan_id)
+    if "stage_report" not in state:
+        state["stage_report"] = init_stage_report(state.get("current_stage", "idle"))
+    return _serializable_scan_state(state)
 
 @app.get("/history")
 async def get_history():
@@ -2704,12 +2894,14 @@ async def get_history():
     return []
 
 @app.get("/export/json")
-async def export_json():
-    return scan_state["vulnerabilities"]
+async def export_json(scan_id: Optional[str] = None):
+    state = load_scan_state_or_latest(scan_id)
+    return state.get("vulnerabilities", [])
 
 @app.post("/fix/generate")
-async def generate_fix(request: FixRequest):
-    vuln = next((v for v in scan_state["vulnerabilities"] if v["id"] == request.vuln_id), None)
+async def generate_fix(request: FixRequest, scan_id: Optional[str] = None):
+    state = load_scan_state_or_latest(scan_id)
+    vuln = next((v for v in state.get("vulnerabilities", []) if v.get("id") == request.vuln_id), None)
     if not vuln:
         raise HTTPException(status_code=404, detail="Vulnérabilité non trouvée")
     
@@ -2724,10 +2916,11 @@ async def download_patch(patch_file: str):
     return FileResponse(patch_path, media_type='text/plain', filename=patch_file)
 
 @app.get("/export/report")
-async def export_report_html():
+async def export_report_html(scan_id: Optional[str] = None):
     """Génère un rapport HTML"""
+    target_state = load_scan_state_or_latest(scan_id)
     vulns_html = ""
-    for v in scan_state["vulnerabilities"]:
+    for v in target_state.get("vulnerabilities", []):
         color = "red" if v['severity'] == 'Critical' else "orange" if v['severity'] == 'High' else "blue"
         conf_color = "green" if v['confidence'] >= 70 else "orange" if v['confidence'] >= 40 else "red"
         safe_severity = html.escape(str(v.get("severity", "Unknown")))
@@ -2752,12 +2945,12 @@ async def export_report_html():
             <div class="fix-block"><strong>Correction:</strong><pre>{safe_fix}</pre></div>
         </div>
         """
-    safe_scan_id = html.escape(str(scan_state.get("id", "N/A")))
-    safe_profile = html.escape(str(scan_state.get("profile", "N/A")))
-    safe_mode = html.escape(str(scan_state.get("mode", "N/A")))
-    safe_critical = html.escape(str(scan_state["stats"].get("critical", 0)))
-    safe_high = html.escape(str(scan_state["stats"].get("high", 0)))
-    safe_conf_score = html.escape(str(scan_state.get("confidence_score", 0.0)))
+    safe_scan_id = html.escape(str(target_state.get("id", "N/A")))
+    safe_profile = html.escape(str(target_state.get("profile", "N/A")))
+    safe_mode = html.escape(str(target_state.get("mode", "N/A")))
+    safe_critical = html.escape(str(target_state.get("stats", {}).get("critical", 0)))
+    safe_high = html.escape(str(target_state.get("stats", {}).get("high", 0)))
+    safe_conf_score = html.escape(str(target_state.get("confidence_score", 0.0)))
 
     html_doc = f"""
     <!DOCTYPE html>

@@ -596,6 +596,16 @@ DEVSECOPS_EXTRA_FILENAMES = {"Dockerfile", "docker-compose.yml", "docker-compose
 SCAN_EXCLUDE_FILE_SUFFIXES = (".bak", ".tmp", ".temp", ".old", ".orig", ".swp", ".swo", "~")
 DEFAULT_MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024
 RETRYABLE_STATUS_CODES = {502, 503, 504, 524}
+STRICT_EVIDENCE = os.getenv("NEXUS_STRICT_EVIDENCE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+SENSITIVE_EVIDENCE_RULES = {
+    "deserialization": (
+        re.compile(r"\bpickle\.loads?\b", re.IGNORECASE),
+        re.compile(r"\bcpickle\b", re.IGNORECASE),
+        re.compile(r"\bmarshal\.loads?\b", re.IGNORECASE),
+        re.compile(r"\byaml\.load\b", re.IGNORECASE),
+    ),
+}
 
 # ==========================================
 # 🚫 VULNÉRABILITÉS IMPOSSIBLES PAR LANGAGE
@@ -999,6 +1009,86 @@ def find_code_lines(file_content: str, evidence: str) -> tuple:
             
     return (None, None)
 
+
+def _normalize_whitespace(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _evidence_matches_file(file_content: str, evidence: str) -> bool:
+    if not file_content or not evidence:
+        return False
+
+    evidence_text = str(evidence).strip()
+    if not evidence_text:
+        return False
+    if evidence_text in file_content:
+        return True
+
+    normalized_evidence = _normalize_whitespace(evidence_text)
+    normalized_file = _normalize_whitespace(file_content)
+    if normalized_evidence and normalized_evidence in normalized_file:
+        return True
+
+    identifiers = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", evidence_text)
+    if identifiers:
+        matches = [ident for ident in identifiers if ident in file_content]
+        if len(matches) >= 1:
+            return True
+    return False
+
+
+def _detect_sensitive_evidence_kind(vuln: Dict[str, Any]) -> Optional[str]:
+    text = " ".join(
+        [
+            str(vuln.get("type", "")),
+            str(vuln.get("title", "")),
+            str(vuln.get("description", "")),
+        ]
+    ).lower()
+    if any(keyword in text for keyword in ("deserial", "pickle", "marshal", "yaml.load")):
+        return "deserialization"
+    return None
+
+
+def _validate_sensitive_evidence(file_content: str, vuln: Dict[str, Any], sensitive_kind: str) -> bool:
+    patterns = SENSITIVE_EVIDENCE_RULES.get(sensitive_kind, ())
+    return any(pattern.search(file_content or "") for pattern in patterns)
+
+
+def evaluate_evidence_gate(vuln: Dict[str, Any], file_content: str) -> Tuple[bool, str]:
+    if not STRICT_EVIDENCE:
+        return True, "strict_evidence_disabled"
+
+    combined_text = " ".join(
+        [
+            str(vuln.get("title", "")),
+            str(vuln.get("description", "")),
+            str(vuln.get("type", "")),
+        ]
+    ).lower()
+    if "cross-file hint" in combined_text or "cross file hint" in combined_text:
+        return False, "cross_file_hint_only"
+
+    raw_evidence = vuln.get("evidence", "")
+    if isinstance(raw_evidence, list):
+        raw_evidence = raw_evidence[0] if raw_evidence else ""
+    evidence = str(raw_evidence or "").strip()
+
+    if not evidence:
+        return False, "missing_evidence"
+    if not _evidence_matches_file(file_content, evidence):
+        return False, "evidence_not_found_in_file"
+
+    sensitive_kind = _detect_sensitive_evidence_kind(vuln)
+    if sensitive_kind and not _validate_sensitive_evidence(file_content, vuln, sensitive_kind):
+        return False, f"sensitive_evidence_missing:{sensitive_kind}"
+
+    severity = str(vuln.get("severity", "")).lower()
+    if severity in {"critical", "high"} and not evidence:
+        return False, "high_severity_requires_verified_evidence"
+
+    return True, "verified"
+
 # ==========================================
 # 🎯 FILTRAGE POST-IA (LOGIQUE AUTOUR DU MOTEUR)
 # ==========================================
@@ -1143,15 +1233,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
                     evidence_normalized = ' '.join(evidence_clean.split())
                     file_normalized = ' '.join(file_content.split())
                     if evidence_normalized not in file_normalized:
-                        # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                        if vuln_sev_val >= 3: # High or Critical
-                            v["evidence_missing"] = True
-                            v["needs_manual_review"] = True
-                            v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                            add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                        else:
-                            add_log(f"🗑️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
-                            continue
+                        add_log(f"🗑️ Filtered: {title} | reason=proof_missing ({mode_key})", "info")
+                        continue
         else:
             # 🧠 DEEP/DEVSECOPS: Preuve structurelle
             # Accepté si: line existe OU evidence partielle OU référence fonction/variable
@@ -1185,15 +1268,8 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
             
             # Si aucune preuve valide en Deep, on filtre (mais moins strict qu'en Rapid)
             if not has_valid_proof and evidence:
-                # V3.1 FIX: RESCUE HIGH/CRITICAL IF PROOF MISSING
-                if vuln_sev_val >= 3: # High or Critical
-                    v["evidence_missing"] = True
-                    v["needs_manual_review"] = True
-                    v["note"] = "Evidence missing: verify manually (High Severity preserved)"
-                    add_log(f"⚠️ Rescue: {title} | reason=high_severity_proof_missing", "warning")
-                else:
-                    add_log(f"🗑️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
-                    continue
+                add_log(f"🗑️ Filtered: {title} | reason=structural_proof_failed ({mode_key})", "info")
+                continue
         
         # ==========================================
         # FILTRE 4: V2.5 - Vulnérabilités impossibles par langage
@@ -1208,6 +1284,11 @@ def apply_mode_filters(vulns: list, mode_config: dict, filepath: str, file_conte
                     break
             if is_forbidden:
                 continue
+
+        evidence_ok, evidence_reason = evaluate_evidence_gate(v, file_content or "")
+        if not evidence_ok:
+            add_log(f"🗑️ Filtered: {title} | reason={evidence_reason}", "info")
+            continue
         
         filtered.append(v)
     

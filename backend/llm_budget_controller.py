@@ -36,6 +36,10 @@ class LLMBudgetController:
         if ollama_mode == "remote":
             concurrency = max(1, concurrency - 1)
             timeout_s = int(round(timeout_s * 1.35))
+        read_timeout_s = int(timeout_s)
+        connect_timeout_s = int(_clamp(read_timeout_s * 0.15, 3, 12))
+        if ollama_mode == "remote":
+            connect_timeout_s = max(connect_timeout_s, 8)
 
         temp_map = {
             "eco": 0.03,
@@ -90,6 +94,8 @@ class LLMBudgetController:
             "top_p": float(top_p_map.get(profile_key, 0.85)),
             "concurrency": int(concurrency),
             "timeout_s": int(timeout_s),
+            "connect_timeout_s": int(connect_timeout_s),
+            "read_timeout_s": int(read_timeout_s),
             "retries": int(retries),
             "retry_backoff_factor": float(backoff_factor),
             "early_exit_strategy": early_exit_strategy,

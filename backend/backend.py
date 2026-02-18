@@ -1414,7 +1414,11 @@ class StableEngine:
         top_p: Optional[float] = None,
     ) -> Optional[dict]:
         """Appel IA simple avec retry et fallback"""
-        timeout = int(self.budget_plan.get("timeout_s", self.profile.get("timeout", 180)))
+        read_timeout_s = int(self.budget_plan.get("read_timeout_s", self.budget_plan.get("timeout_s", self.profile.get("timeout", 180))))
+        connect_timeout_s = int(self.budget_plan.get("connect_timeout_s", max(3, min(12, int(read_timeout_s * 0.15) or 3))))
+        read_timeout_s = max(1, read_timeout_s)
+        connect_timeout_s = max(1, connect_timeout_s)
+        request_timeout = (connect_timeout_s, read_timeout_s)
         model = self.profile["model"]
 
         if max_retries is None:
@@ -1426,6 +1430,8 @@ class StableEngine:
         retryable_status_codes = {int(code) for code in raw_retryable_codes if str(code).isdigit()}
         if not retryable_status_codes:
             retryable_status_codes = set(RETRYABLE_STATUS_CODES)
+        connect_timeout_exc = getattr(requests.exceptions, "ConnectTimeout", requests.exceptions.Timeout)
+        read_timeout_exc = getattr(requests.exceptions, "ReadTimeout", requests.exceptions.Timeout)
 
         llm_options = self._build_llm_options(
             max_output_tokens=max_output_tokens,
@@ -1477,7 +1483,7 @@ class StableEngine:
                         "format": "json",
                         "options": llm_options
                     },
-                    timeout=timeout
+                    timeout=request_timeout
                 )
                 status_code = response.status_code
                 
@@ -1498,6 +1504,12 @@ class StableEngine:
                 else:
                     error_reason = f"http_{response.status_code}"
                     retryable_http = response.status_code in retryable_status_codes
+                    http_cause = {
+                        502: "bad_gateway",
+                        503: "service_unavailable",
+                        504: "gateway_timeout",
+                        524: "origin_timeout",
+                    }.get(response.status_code, "http_error")
                     add_log(
                         f"❌ HTTP {response.status_code} pour {filename}{' (retryable)' if retryable_http else ''}",
                         "warning" if retryable_http else "error",
@@ -1505,21 +1517,51 @@ class StableEngine:
                         event="llm_http_error",
                         filename=filename,
                         http_status=response.status_code,
+                        cause=http_cause,
                         retryable=retryable_http,
                     )
                     if retryable_http and (attempt + 1) < max_retries:
                         continue
                     break
                     
+            except connect_timeout_exc:
+                error_reason = "connect_timeout"
+                add_log(
+                    f"⏱️ Connect timeout ({connect_timeout_s}s) pour {filename}",
+                    "warning",
+                    stage="analyze",
+                    event="llm_connect_timeout",
+                    filename=filename,
+                    connect_timeout_s=connect_timeout_s,
+                    read_timeout_s=read_timeout_s,
+                )
+                if (attempt + 1) < max_retries:
+                    continue
+                break
+            except read_timeout_exc:
+                error_reason = "read_timeout"
+                add_log(
+                    f"⏱️ Read timeout ({read_timeout_s}s) pour {filename}",
+                    "warning",
+                    stage="analyze",
+                    event="llm_read_timeout",
+                    filename=filename,
+                    connect_timeout_s=connect_timeout_s,
+                    read_timeout_s=read_timeout_s,
+                )
+                if (attempt + 1) < max_retries:
+                    continue
+                break
             except requests.exceptions.Timeout:
                 error_reason = "timeout"
                 add_log(
-                    f"⏱️ Timeout ({timeout}s) pour {filename}",
+                    f"⏱️ Timeout pour {filename}",
                     "warning",
                     stage="analyze",
                     event="llm_timeout",
                     filename=filename,
-                    timeout_s=timeout,
+                    connect_timeout_s=connect_timeout_s,
+                    read_timeout_s=read_timeout_s,
                 )
                 if (attempt + 1) < max_retries:
                     continue
@@ -1855,6 +1897,12 @@ def compute_remote_safe_policy(profile_key: str, mode_key: str, base_url: str) -
         "elite": 300,
         "titan": 420,
     }
+    connect_timeout_map = {
+        "eco": 8,
+        "balanced": 9,
+        "elite": 10,
+        "titan": 12,
+    }
     min_retries_map = {
         "eco": 2,
         "balanced": 3,
@@ -1879,6 +1927,7 @@ def compute_remote_safe_policy(profile_key: str, mode_key: str, base_url: str) -
         "latency_threshold_ms": latency_threshold_ms,
         "target_chunk_tokens": target_chunk_tokens,
         "chunk_timeout_s": int(chunk_timeout_map.get(profile_key, 150)),
+        "connect_timeout_s": int(connect_timeout_map.get(profile_key, 8)),
         "file_deadline_s": int(file_deadline_map.get(profile_key, 240)),
         "min_retries": int(min_retries_map.get(profile_key, 3)),
         "retry_backoff_factor": 1.85,
@@ -1888,12 +1937,19 @@ def compute_remote_safe_policy(profile_key: str, mode_key: str, base_url: str) -
 
 def apply_remote_safe_budget_overrides(budget_plan: Dict[str, Any], remote_policy: Dict[str, Any]) -> Dict[str, Any]:
     plan = dict(budget_plan or {})
+    read_timeout = int(plan.get("read_timeout_s", plan.get("timeout_s", 90)))
+    connect_timeout = int(plan.get("connect_timeout_s", max(3, min(12, int(read_timeout * 0.15) or 3))))
     if not remote_policy.get("enabled"):
+        plan["read_timeout_s"] = max(1, read_timeout)
+        plan["connect_timeout_s"] = max(1, connect_timeout)
+        plan["timeout_s"] = plan["read_timeout_s"]
         plan.setdefault("retry_jitter_s", 0.0)
         plan.setdefault("retryable_status_codes", sorted(RETRYABLE_STATUS_CODES))
         return plan
 
-    plan["timeout_s"] = max(int(plan.get("timeout_s", 90)), int(remote_policy.get("chunk_timeout_s", 150)))
+    plan["read_timeout_s"] = max(read_timeout, int(remote_policy.get("chunk_timeout_s", 150)))
+    plan["connect_timeout_s"] = max(connect_timeout, int(remote_policy.get("connect_timeout_s", 8)))
+    plan["timeout_s"] = plan["read_timeout_s"]
     plan["retries"] = max(int(plan.get("retries", 1)), int(remote_policy.get("min_retries", 3)))
     plan["retry_backoff_factor"] = max(float(plan.get("retry_backoff_factor", 1.5)), float(remote_policy.get("retry_backoff_factor", 1.85)))
     plan["retry_jitter_s"] = max(float(plan.get("retry_jitter_s", 0.0)), float(remote_policy.get("retry_jitter_s", 0.65)))
@@ -2090,6 +2146,8 @@ def build_scan_preflight(
                 "concurrency": llm_plan.get("concurrency"),
                 "analysis_passes": llm_plan.get("analysis_passes"),
                 "timeout_s": llm_plan.get("timeout_s"),
+                "connect_timeout_s": llm_plan.get("connect_timeout_s"),
+                "read_timeout_s": llm_plan.get("read_timeout_s"),
                 "retries": llm_plan.get("retries"),
             },
             "chunking": {
@@ -2476,6 +2534,8 @@ def run_scan(target: str, profile_key: str, mode_key: str, ollama_mode: str = "a
                     "max_output_tokens": budget_plan.get("max_output_tokens"),
                     "temperature": budget_plan.get("temperature"),
                     "top_p": budget_plan.get("top_p"),
+                    "connect_timeout_s": budget_plan.get("connect_timeout_s"),
+                    "read_timeout_s": budget_plan.get("read_timeout_s"),
                     "retries": budget_plan.get("retries"),
                     "analysis_passes": budget_plan.get("analysis_passes"),
                     "concurrency": budget_plan.get("concurrency"),

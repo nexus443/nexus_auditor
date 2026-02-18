@@ -1965,6 +1965,29 @@ def format_bytes(value: int) -> str:
     return f"{size:.{precision}f} {units[idx]}"
 
 
+def resolve_global_scan_timeout_s(profile_key: str, profile_config: Dict[str, Any]) -> int:
+    profile_env_key = f"NEXUS_SCAN_TIMEOUT_S_{str(profile_key).strip().upper()}"
+    default_raw = os.getenv("NEXUS_SCAN_TIMEOUT_S_DEFAULT", "").strip()
+    profile_raw = os.getenv(profile_env_key, "").strip()
+    fallback_map = {
+        "eco": 900,
+        "balanced": 1200,
+        "elite": 1800,
+        "titan": 2400,
+    }
+    raw = profile_raw or default_raw or str(profile_config.get("scan_timeout_s", fallback_map.get(profile_key, 1200)))
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        timeout_s = int(fallback_map.get(profile_key, 1200))
+    return max(30, timeout_s)
+
+
+def ensure_scan_within_deadline(scan_deadline_ts: float, context: str = "scan"):
+    if time.time() > float(scan_deadline_ts):
+        raise TimeoutError(f"Global scan timeout reached during {context}")
+
+
 def get_max_scan_file_bytes() -> int:
     raw = os.getenv("NEXUS_MAX_SCAN_FILE_BYTES", str(DEFAULT_MAX_SCAN_FILE_BYTES)).strip()
     try:
@@ -2347,6 +2370,9 @@ def run_scan(
     profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
     mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
     resolved_mode_key = MODE_CONTROLLER.resolve_mode_key(mode_key=mode_key, mode_config=mode)
+    global_timeout_s = resolve_global_scan_timeout_s(profile_key, profile)
+    scan_started_at = time.time()
+    scan_deadline_ts = scan_started_at + float(global_timeout_s)
     budget_plan = BUDGET_CONTROLLER.compute_plan(
         profile_key=profile_key,
         mode_key=resolved_mode_key,
@@ -2367,7 +2393,7 @@ def run_scan(
     scan_state.update({
         "id": scan_id,
         "is_scanning": True,
-        "start_time": time.time(),
+        "start_time": scan_started_at,
         "current_stage": "normalize",
         "stage_report": init_stage_report("normalize"),
         "progress": 0,
@@ -2383,11 +2409,13 @@ def run_scan(
         "target_dir": None,
         "profile": profile_key,
         "mode": mode_key,
+        "error": None,
         "budget_info": {
             "max_files": effective_mode["max_files"],
             "max_time_per_file": effective_mode["max_time_per_file"],
             "min_severity": effective_mode["min_severity"],
             "min_confidence": effective_mode["min_confidence"],
+            "global_timeout_s": global_timeout_s,
             "llm_budget": budget_plan,
             "remote_safe": remote_policy,
         },
@@ -2423,6 +2451,13 @@ def run_scan(
         max_files=effective_mode["max_files"],
         min_severity=effective_mode["min_severity"],
         min_confidence=effective_mode["min_confidence"],
+    )
+    add_log(
+        f"⏳ Global timeout scan: {global_timeout_s}s",
+        "info",
+        stage="normalize",
+        event="scan_global_timeout",
+        global_timeout_s=global_timeout_s,
     )
     add_log(
         f"🧮 LLM plan: ctx={budget_plan['max_context_tokens']} out={budget_plan['max_output_tokens']} "
@@ -2463,23 +2498,24 @@ def run_scan(
     )
     add_log("Initialisation du scan...", "info", stage="normalize", event="scan_init")
 
-    # V2.5: Vérification et installation automatique du modèle
-    model_name = profile["model"]
-    # V3.4: Logging now done inside ensure_model_available()
-    if not ensure_model_available(model_name, base_url):  # V3.0: Passer URL dynamique
-        add_log(f"❌ Impossible d'installer le modèle {model_name}. Scan annulé.", "critical")
-        if current_stage:
-            end_scan_stage(current_stage, stage_started_at)
-            current_stage, stage_started_at = None, None
-        scan_state["is_scanning"] = False
-        scan_state["current_stage"] = "failed"
-        mark_stage_terminal_state("failed")
-        return
-
     tmp_dir = None
     target_dir = target
     
     try:
+        ensure_scan_within_deadline(scan_deadline_ts, context="initialization")
+        # V2.5: Vérification et installation automatique du modèle
+        model_name = profile["model"]
+        # V3.4: Logging now done inside ensure_model_available()
+        if not ensure_model_available(model_name, base_url):  # V3.0: Passer URL dynamique
+            add_log(f"❌ Impossible d'installer le modèle {model_name}. Scan annulé.", "critical")
+            if current_stage:
+                end_scan_stage(current_stage, stage_started_at)
+                current_stage, stage_started_at = None, None
+            scan_state["is_scanning"] = False
+            scan_state["current_stage"] = "failed"
+            mark_stage_terminal_state("failed")
+            return
+
         # Clone si URL Git
         if target.startswith(("http", "git@")):
             # V3.0 FIX: Créer répertoire UNIQUE avec prefix
@@ -2501,6 +2537,7 @@ def run_scan(
         scan_state["target_dir"] = target_dir
 
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "index")
+        ensure_scan_within_deadline(scan_deadline_ts, context="index")
         
         telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
         collection = collect_scan_candidates(target_dir, resolved_mode_key, effective_mode)
@@ -2588,6 +2625,7 @@ def run_scan(
         cross_file_hints: List[str] = []
         
         for i, file_entry in enumerate(file_entries):
+            ensure_scan_within_deadline(scan_deadline_ts, context="analyze")
             if scan_state["should_stop"]:
                 add_log("🛑 Scan interrompu par l'utilisateur", "warning")
                 break
@@ -2704,14 +2742,33 @@ def run_scan(
             mark_stage_terminal_state("stopped")
 
     except Exception as e:
-        add_log(f"🔥 Erreur Critique: {str(e)}", "critical", stage=scan_state.get("current_stage"), event="scan_error")
+        scan_state["error"] = str(e)[:500]
+        add_log(
+            f"🔥 Erreur Critique: {str(e)}",
+            "critical",
+            stage=scan_state.get("current_stage"),
+            event="scan_error",
+            error=scan_state.get("error"),
+        )
+        if isinstance(e, TimeoutError):
+            add_log(
+                "⏰ Scan arrêté: timeout global atteint",
+                "error",
+                stage=scan_state.get("current_stage"),
+                event="scan_global_timeout_reached",
+                global_timeout_s=global_timeout_s,
+            )
         scan_state["current_stage"] = "failed"
+        scan_state["should_stop"] = True
+        scan_state["is_scanning"] = False
         mark_stage_terminal_state("failed")
     finally:
         if current_stage:
             end_scan_stage(current_stage, stage_started_at)
             current_stage, stage_started_at = None, None
         scan_state["is_scanning"] = False
+        if scan_state.get("current_stage") == "failed":
+            scan_state["should_stop"] = True
         persist_scan_state(scan_state)
         # V3.0: Cleanup tmp_dir si clone Git
         if tmp_dir and os.path.exists(tmp_dir):

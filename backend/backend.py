@@ -319,9 +319,10 @@ def get_ollama_base_url(scan_request: Optional['ScanRequest'] = None, ollama_mod
 
 def get_installed_models(ollama_base_url: str = None) -> set:
     """Récupère la liste des modèles installés dans Ollama"""
+    base_url = (ollama_base_url or OLLAMA_BASE_URL).rstrip("/")
     try:
         # V3.4: Reduced timeout from 10s to 3s for faster feedback in Docker
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        response = requests.get(f"{base_url}/api/tags", timeout=3)
         if response.status_code == 200:
             data = response.json()
             models = {m.get("name", "") for m in data.get("models", [])}

@@ -966,24 +966,24 @@ def extract_json_from_text(text: str) -> list:
 # 📍 ECO RULE #6: CALCUL DES LIGNES PAR LE MOTEUR
 # ==========================================
 
-def find_code_lines(file_content: str, evidence: str) -> tuple:
+def find_code_lines_with_reason(file_content: str, evidence: str) -> Tuple[Optional[int], Optional[int], str]:
     """
     Calcule les numéros de ligne START/END à partir de la preuve.
     V3.1: Support Fuzzy Matching (ignore espaces)
     """
     if not evidence or not file_content:
-        return (None, None)
+        return (None, None, "missing_evidence_or_file_content")
     
     evidence_clean = evidence.strip()
     if not evidence_clean:
-        return (None, None)
+        return (None, None, "empty_evidence")
     
     lines = file_content.split('\n')
     
     # 1. Exact Match (Ligne unique)
     for i, line in enumerate(lines, start=1):
         if evidence_clean in line:
-            return (i, i)
+            return (i, i, "exact_line_match")
     
     # 2. Exact Match (Multi-lignes)
     if evidence_clean in file_content:
@@ -992,22 +992,27 @@ def find_code_lines(file_content: str, evidence: str) -> tuple:
         # Compter les \n avant
         start_line = file_content.count('\n', 0, start_idx) + 1
         end_line = start_line + evidence_clean.count('\n')
-        return (start_line, end_line)
+        return (start_line, end_line, "exact_multiline_match")
 
     # 3. Fuzzy Match (Ignore Whitespace)
     # C'est coûteux, on le fait seulement si exact match échoue
     ev_normalized = ''.join(evidence_clean.split())
     if len(ev_normalized) < 10: # Trop court pour fuzzy fiable
-        return (None, None)
+        return (None, None, "snippet_too_short_for_fuzzy")
         
     for i in range(len(lines)):
         # Optimisation: Check fenêtre glissante
         # (Complexe à implémenter parfaitement, on fait simple: check ligne par ligne normalisée)
         line_norm = ''.join(lines[i].split())
         if ev_normalized in line_norm:
-            return (i + 1, i + 1)
+            return (i + 1, i + 1, "fuzzy_line_match")
             
-    return (None, None)
+    return (None, None, "snippet_not_found")
+
+
+def find_code_lines(file_content: str, evidence: str) -> tuple:
+    line_start, line_end, _ = find_code_lines_with_reason(file_content, evidence)
+    return (line_start, line_end)
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -1327,19 +1332,17 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
     if not isinstance(evidence, str):
         evidence = str(evidence)
     
-    # ECO RULE #6: Calculer les lignes à partir de l'evidence
-    line_start, line_end = find_code_lines(file_content, evidence)
-    
-    # Fallback: Si le moteur trouve pas, utiliser la ligne de l'IA (avec méfiance)
+    # ECO RULE #6: Résolution des lignes à partir du snippet vérifiable.
+    line_start, line_end, line_reason = find_code_lines_with_reason(file_content, evidence)
     if line_start is None:
-        line_ai = vuln.get("line", "0")
-        line_clean = ''.join(filter(str.isdigit, str(line_ai)))
-        if line_clean and line_clean != "0":
-            line_start = int(line_clean)
-            line_end = line_start
+        line_value: Any = "N/A"
+        line_end_value: Any = "N/A"
+    else:
+        line_value = line_start
+        line_end_value = line_end
     
     # Snippet de code
-    snippet = evidence if evidence else extract_code_context(filepath, str(line_start)) if line_start else "Code non disponible"
+    snippet = evidence if evidence else "Code non disponible"
     
     # V3.1: Normalisation Types & Sévérités par REGEX
     title = str(vuln.get("title", "")).strip()
@@ -1411,8 +1414,9 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
         "filepath": filepath,
         "title": title if title else final_type,
         "severity": sev,
-        "line": line_start,
-        "line_end": line_end,
+        "line": line_value,
+        "line_end": line_end_value,
+        "line_reason": line_reason,
         "evidence": evidence,
         "description": final_desc,
         "fix": final_fix,
@@ -1425,7 +1429,15 @@ def normalize_vulnerability(vuln: dict, filepath: str, filename: str, raw_respon
         "evidence_missing": False,
         "needs_manual_review": False
     }
-    return ensure_proof(normalized)
+    proofed = ensure_proof(normalized)
+    if line_value == "N/A":
+        proofed["line"] = "N/A"
+        proofed["line_end"] = "N/A"
+        proof = proofed.get("proof", {}) or {}
+        proof["line_start"] = None
+        proof["line_end"] = None
+        proofed["proof"] = proof
+    return proofed
 
 
 # ==========================================

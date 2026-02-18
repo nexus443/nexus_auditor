@@ -102,6 +102,17 @@ class ChunkerTests(unittest.TestCase):
         self.assertEqual(plan["max_chunks"], 1)
         self.assertEqual(len(plan["chunks"]), 1)
 
+    def test_explicit_target_chunk_tokens_is_respected(self):
+        content = ("security review content line\n" * 900).strip()
+        profile = {"num_ctx": 16384, "num_predict": 1024}
+        mode = {"label": "Scan Profond", "target_chunk_tokens": 320}
+
+        plan = build_chunk_plan(content, "README.txt", profile, mode)
+        self.assertEqual(plan["token_budget"], 320)
+        self.assertGreaterEqual(len(plan["chunks"]), 2)
+        for chunk in plan["chunks"]:
+            self.assertLessEqual(chunk["tokens_estimated"], 336)
+
 
 if __name__ == "__main__":
     unittest.main()

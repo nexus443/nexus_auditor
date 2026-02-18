@@ -70,6 +70,8 @@ class LLMBudgetControllerTests(unittest.TestCase):
 
         self.assertLessEqual(remote_plan["concurrency"], auto_plan["concurrency"])
         self.assertGreaterEqual(remote_plan["timeout_s"], auto_plan["timeout_s"])
+        self.assertGreaterEqual(remote_plan["connect_timeout_s"], auto_plan["connect_timeout_s"])
+        self.assertGreaterEqual(remote_plan["read_timeout_s"], auto_plan["read_timeout_s"])
         self.assertGreaterEqual(remote_plan["retries"], auto_plan["retries"])
 
 

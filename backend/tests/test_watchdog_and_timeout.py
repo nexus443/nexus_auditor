@@ -123,6 +123,21 @@ class WatchdogAndTimeoutTests(unittest.TestCase):
         backend_module.LATEST_SCAN_POINTER_FILE = self._saved_latest_pointer
         self._tmpdir_ctx.cleanup()
 
+    @staticmethod
+    def _collection_for_file(file_path: str):
+        file_size = os.path.getsize(file_path)
+        return {
+            "file_entries": [{"path": file_path, "score": 0, "reasons": []}],
+            "files_discovered": 1,
+            "files_scheduled": 1,
+            "files_skipped": 0,
+            "bytes_discovered": file_size,
+            "bytes_scheduled": file_size,
+            "excluded_policy_files": 0,
+            "excluded_oversized_files": 0,
+            "max_file_size_bytes": backend_module.get_max_scan_file_bytes(),
+        }
+
     def test_run_scan_marks_failed_on_exception_and_unsets_scanning(self):
         with tempfile.TemporaryDirectory() as repo_dir:
             with open(os.path.join(repo_dir, "app.py"), "w", encoding="utf-8") as f:
@@ -174,6 +189,131 @@ class WatchdogAndTimeoutTests(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.get("current_stage"), "failed")
         self.assertFalse(persisted.get("is_scanning"))
+
+    def test_run_scan_correlate_exception_marks_failed_without_stuck_stage(self):
+        class FakeEngine:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def scan_file(self, *args, **kwargs):
+                return [{
+                    "title": "Test vuln",
+                    "severity": "Medium",
+                    "confidence": 72.0,
+                    "description": "demo",
+                    "file": "app.py",
+                }]
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            file_path = os.path.join(repo_dir, "app.py")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("def run():\n    return 1\n")
+
+            with patch.object(backend_module, "ensure_model_available", return_value=True), \
+                 patch.object(backend_module, "collect_scan_candidates", return_value=self._collection_for_file(file_path)), \
+                 patch.object(backend_module, "StableEngine", FakeEngine), \
+                 patch.object(backend_module, "correlate_findings", side_effect=RuntimeError("boom correlate")):
+                backend_module.run_scan(
+                    target=repo_dir,
+                    profile_key="balanced",
+                    mode_key="deep",
+                    ollama_mode="auto",
+                    ollama_url=None,
+                    scan_id="scan_corr_err",
+                )
+
+        self.assertEqual(backend_module.scan_state.get("current_stage"), "failed")
+        self.assertFalse(backend_module.scan_state.get("is_scanning"))
+        self.assertTrue(backend_module.scan_state.get("should_stop"))
+        self.assertIn("boom correlate", str(backend_module.scan_state.get("error", "")))
+        stage_report = backend_module.scan_state.get("stage_report", {})
+        self.assertEqual(stage_report.get("terminal_state"), "failed")
+
+    def test_run_scan_correlate_timeout_marks_failed_without_stuck_stage(self):
+        class FakeEngine:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def scan_file(self, *args, **kwargs):
+                return [{
+                    "title": "Timeout test vuln",
+                    "severity": "Medium",
+                    "confidence": 60.0,
+                    "description": "demo",
+                    "file": "app.py",
+                }]
+
+        def hanging_correlate(_vulns):
+            import time as _time
+            _time.sleep(2.0)
+            return 60.0
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            file_path = os.path.join(repo_dir, "app.py")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("def run():\n    return 1\n")
+
+            with patch.object(backend_module, "ensure_model_available", return_value=True), \
+                 patch.object(backend_module, "collect_scan_candidates", return_value=self._collection_for_file(file_path)), \
+                 patch.object(backend_module, "StableEngine", FakeEngine), \
+                 patch.object(backend_module, "resolve_correlate_timeout_s", return_value=1), \
+                 patch.object(backend_module, "correlate_findings", side_effect=hanging_correlate):
+                backend_module.run_scan(
+                    target=repo_dir,
+                    profile_key="elite",
+                    mode_key="deep",
+                    ollama_mode="auto",
+                    ollama_url=None,
+                    scan_id="scan_corr_timeout",
+                )
+
+        self.assertEqual(backend_module.scan_state.get("current_stage"), "failed")
+        self.assertFalse(backend_module.scan_state.get("is_scanning"))
+        self.assertTrue(backend_module.scan_state.get("should_stop"))
+        self.assertIn("correlate_timeout", str(backend_module.scan_state.get("error", "")))
+        stage_report = backend_module.scan_state.get("stage_report", {})
+        self.assertEqual(stage_report.get("terminal_state"), "failed")
+
+    def test_run_scan_success_finalizes_report_stage(self):
+        class FakeEngine:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def scan_file(self, *args, **kwargs):
+                return [{
+                    "title": "Success test vuln",
+                    "severity": "Low",
+                    "confidence": 45.0,
+                    "description": "demo",
+                    "file": "app.py",
+                }]
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            file_path = os.path.join(repo_dir, "app.py")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("def run():\n    return 1\n")
+
+            with patch.object(backend_module, "ensure_model_available", return_value=True), \
+                 patch.object(backend_module, "collect_scan_candidates", return_value=self._collection_for_file(file_path)), \
+                 patch.object(backend_module, "StableEngine", FakeEngine), \
+                 patch.object(backend_module, "correlate_findings", return_value=88.5), \
+                 patch.object(backend_module, "save_to_history") as mock_save_history:
+                backend_module.run_scan(
+                    target=repo_dir,
+                    profile_key="balanced",
+                    mode_key="deep",
+                    ollama_mode="auto",
+                    ollama_url=None,
+                    scan_id="scan_success",
+                )
+
+        self.assertEqual(backend_module.scan_state.get("current_stage"), "completed")
+        self.assertFalse(backend_module.scan_state.get("is_scanning"))
+        self.assertFalse(backend_module.scan_state.get("should_stop"))
+        self.assertTrue(backend_module.scan_state.get("report_generated"))
+        stage_report = backend_module.scan_state.get("stage_report", {})
+        self.assertEqual(stage_report.get("terminal_state"), "completed")
+        mock_save_history.assert_called_once()
 
 
 if __name__ == "__main__":

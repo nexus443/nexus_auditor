@@ -16,7 +16,7 @@ import signal
 from datetime import datetime
 from collections import deque
 from urllib.parse import urlparse
-from typing import Optional, List, Dict, Any, Tuple, Union
+from typing import Optional, List, Dict, Any, Tuple, Union, Callable
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -684,6 +684,7 @@ def new_scan_state() -> Dict[str, Any]:
         "confidence_score": 0.0,
         "failed_analyses": 0,
         "successful_analyses": 0,
+        "report_generated": False,
         "target_dir": None,
         "profile": None,
         "mode": None,
@@ -2085,6 +2086,66 @@ def resolve_global_scan_timeout_s(profile_key: str, profile_config: Dict[str, An
     return max(30, timeout_s)
 
 
+def resolve_correlate_timeout_s(profile_key: str, profile_config: Dict[str, Any]) -> int:
+    env_raw = os.getenv("NEXUS_CORRELATE_TIMEOUT_S", "").strip()
+    if env_raw:
+        try:
+            return max(2, int(env_raw))
+        except (TypeError, ValueError):
+            pass
+
+    fallback_map = {
+        "eco": 10,
+        "balanced": 20,
+        "elite": 45,
+        "titan": 75,
+    }
+    profile_timeout = profile_config.get("correlate_timeout_s", fallback_map.get(profile_key, 20))
+    try:
+        resolved = int(profile_timeout)
+    except (TypeError, ValueError):
+        resolved = int(fallback_map.get(profile_key, 20))
+    return max(2, resolved)
+
+
+def run_callable_with_timeout(callable_fn: Callable[[], Any], timeout_s: int, timeout_label: str):
+    result: Dict[str, Any] = {}
+    error: Dict[str, Exception] = {}
+
+    def _wrapped():
+        try:
+            result["value"] = callable_fn()
+        except Exception as exc:  # pragma: no cover - behavior asserted from caller
+            error["exc"] = exc
+
+    worker = threading.Thread(target=_wrapped, name=f"nexus_{timeout_label}_worker", daemon=True)
+    worker.start()
+    worker.join(timeout=max(0.001, float(timeout_s)))
+
+    if worker.is_alive():
+        raise TimeoutError(f"{timeout_label}_timeout")
+    if "exc" in error:
+        raise error["exc"]
+    return result.get("value")
+
+
+def correlate_findings(vulnerabilities: List[Dict[str, Any]]) -> float:
+    if not vulnerabilities:
+        return 0.0
+
+    total = 0.0
+    count = 0
+    for finding in vulnerabilities:
+        try:
+            total += float(finding.get("confidence", 0.0))
+            count += 1
+        except (TypeError, ValueError):
+            continue
+    if count <= 0:
+        return 0.0
+    return round(total / count, 2)
+
+
 def ensure_scan_within_deadline(scan_deadline_ts: float, context: str = "scan"):
     if time.time() > float(scan_deadline_ts):
         raise TimeoutError(f"Global scan timeout reached during {context}")
@@ -2685,6 +2746,7 @@ def run_scan(
 
     current_stage = None
     stage_started_at = None
+    scan_finalized = False
 
     # V2.5: Déterminer l'URL Ollama à utiliser
     try:
@@ -2692,6 +2754,7 @@ def run_scan(
     except ValueError as e:
         add_log(f"❌ Erreur config Ollama: {e}", "error")
         scan_state["is_scanning"] = False
+        scan_state["should_stop"] = True
         scan_state["current_stage"] = "failed"
         mark_stage_terminal_state("failed")
         return
@@ -2711,6 +2774,7 @@ def run_scan(
     )
     remote_policy = compute_remote_safe_policy(profile_key, resolved_mode_key, base_url)
     budget_plan = apply_remote_safe_budget_overrides(budget_plan, remote_policy)
+    correlate_timeout_s = resolve_correlate_timeout_s(profile_key, profile)
     effective_mode = dict(mode)
     if remote_policy.get("enabled"):
         effective_mode["target_chunk_tokens"] = int(remote_policy.get("target_chunk_tokens", 3000))
@@ -2735,6 +2799,7 @@ def run_scan(
         "confidence_score": 0.0,
         "failed_analyses": 0,
         "successful_analyses": 0,
+        "report_generated": False,
         "target_dir": None,
         "profile": profile_key,
         "mode": mode_key,
@@ -2747,6 +2812,7 @@ def run_scan(
             "global_timeout_s": global_timeout_s,
             "llm_budget": budget_plan,
             "remote_safe": remote_policy,
+            "correlate_timeout_s": correlate_timeout_s,
         },
         "preflight": {},
         "telemetry": init_scan_telemetry()
@@ -2827,6 +2893,69 @@ def run_scan(
     )
     add_log("Initialisation du scan...", "info", stage="normalize", event="scan_init")
 
+    def finalize_success(total_time: float):
+        nonlocal scan_finalized
+        if scan_finalized:
+            return
+        scan_state["progress"] = 100
+        scan_state["estimated_time"] = "Terminé"
+        scan_state["error"] = None
+        scan_state["should_stop"] = False
+        scan_state["is_scanning"] = False
+        scan_state["current_stage"] = "completed"
+        mark_stage_terminal_state("completed")
+        add_log(
+            "🏁 finalize scan completed",
+            "success",
+            stage="report",
+            event="scan_finalize_completed",
+            duration_seconds=int(max(0.0, float(total_time))),
+            report_generated=bool(scan_state.get("report_generated")),
+        )
+        scan_finalized = True
+
+    def finalize_stopped():
+        nonlocal current_stage, stage_started_at, scan_finalized
+        if scan_finalized:
+            return
+        scan_state["is_scanning"] = False
+        scan_state["should_stop"] = True
+        scan_state["current_stage"] = "stopped"
+        mark_stage_terminal_state("stopped")
+        add_log(
+            "🏁 finalize scan stopped",
+            "warning",
+            stage="stopped",
+            event="scan_finalize_stopped",
+        )
+        current_stage, stage_started_at = None, None
+        scan_finalized = True
+
+    def finalize_failed(reason: str, exc: Optional[Exception] = None, stage_name: Optional[str] = None):
+        nonlocal current_stage, stage_started_at, scan_finalized
+        if scan_finalized:
+            return
+
+        details = str(reason or "scan_failed").strip() or "scan_failed"
+        if exc is not None and str(exc):
+            exc_text = str(exc)
+            details = exc_text if details in {"scan_failed", "correlate_report_failed"} else f"{details}: {exc_text}"
+
+        scan_state["error"] = details[:500]
+        scan_state["current_stage"] = "failed"
+        scan_state["should_stop"] = True
+        scan_state["is_scanning"] = False
+        mark_stage_terminal_state("failed")
+        add_log(
+            "🏁 finalize scan failed",
+            "critical",
+            stage=stage_name or scan_state.get("current_stage"),
+            event="scan_finalize_failed",
+            error=scan_state["error"],
+        )
+        current_stage, stage_started_at = None, None
+        scan_finalized = True
+
     tmp_dir = None
     target_dir = target
     
@@ -2837,12 +2966,7 @@ def run_scan(
         # V3.4: Logging now done inside ensure_model_available()
         if not ensure_model_available(model_name, base_url):  # V3.0: Passer URL dynamique
             add_log(f"❌ Impossible d'installer le modèle {model_name}. Scan annulé.", "critical")
-            if current_stage:
-                end_scan_stage(current_stage, stage_started_at)
-                current_stage, stage_started_at = None, None
-            scan_state["is_scanning"] = False
-            scan_state["current_stage"] = "failed"
-            mark_stage_terminal_state("failed")
+            finalize_failed(f"model_unavailable: {model_name}", stage_name="normalize")
             return
 
         # Clone si URL Git
@@ -2934,10 +3058,7 @@ def run_scan(
         
         if total_files == 0:
             add_log("⚠️ Aucun fichier correspondant aux critères.", "warning")
-            scan_state["progress"] = 100
-            scan_state["estimated_time"] = "Terminé"
-            scan_state["current_stage"] = "completed"
-            mark_stage_terminal_state("completed")
+            finalize_success(total_time=0.0)
             return
 
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "analyze")
@@ -3015,25 +3136,49 @@ def run_scan(
 
             scan_state["progress"] = int(((i + 1) / total_files) * 100)
 
+        if scan_state["should_stop"]:
+            finalize_stopped()
+            return
+
         current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "correlate")
-        
-        # Calcul score de confiance global
-        if scan_state["vulnerabilities"]:
-            avg_conf = sum(v["confidence"] for v in scan_state["vulnerabilities"]) / len(scan_state["vulnerabilities"])
-            scan_state["confidence_score"] = round(avg_conf, 2)
-        
-        if not scan_state["should_stop"]:
+        add_log(
+            "🔗 stage correlate start",
+            "info",
+            stage="correlate",
+            event="stage_correlate_start",
+            correlate_timeout_s=correlate_timeout_s,
+        )
+
+        try:
+            confidence_score = run_callable_with_timeout(
+                lambda: correlate_findings(scan_state.get("vulnerabilities", [])),
+                correlate_timeout_s,
+                "correlate",
+            )
+            scan_state["confidence_score"] = round(float(confidence_score or 0.0), 2)
+            add_log(
+                "✅ stage correlate finish",
+                "info",
+                stage="correlate",
+                event="stage_correlate_finish",
+                confidence_score=scan_state["confidence_score"],
+            )
+
             total_time = time.time() - start_ts
             add_log(f"✅ Audit terminé en {total_time:.0f}s", "success")
             add_log(f"📊 Confiance globale: {scan_state['confidence_score']}%", "info")
             add_log(f"✅ Analyses réussies: {scan_state['successful_analyses']}", "success")
             if scan_state['failed_analyses'] > 0:
                 add_log(f"❌ Analyses échouées: {scan_state['failed_analyses']}", "warning")
-            
+
             current_stage, stage_started_at = switch_scan_stage(current_stage, stage_started_at, "report")
-            scan_state["progress"] = 100
-            scan_state["estimated_time"] = "Terminé"
-            
+            add_log(
+                "📝 stage report start",
+                "info",
+                stage="report",
+                event="stage_report_start",
+            )
+
             summary = {
                 "id": scan_id,
                 "date": datetime.now().isoformat(),
@@ -3064,20 +3209,45 @@ def run_scan(
                 }
             }
             save_to_history(summary)
-            scan_state["current_stage"] = "completed"
-            mark_stage_terminal_state("completed")
-        else:
-            scan_state["current_stage"] = "stopped"
-            mark_stage_terminal_state("stopped")
+            scan_state["report_generated"] = True
+            add_log(
+                "✅ stage report finish",
+                "info",
+                stage="report",
+                event="stage_report_finish",
+                findings=len(scan_state.get("vulnerabilities", [])),
+            )
+            finalize_success(total_time=total_time)
+        except TimeoutError as timeout_err:
+            if str(timeout_err) == "correlate_timeout":
+                add_log(
+                    "⏰ stage correlate timeout",
+                    "error",
+                    stage="correlate",
+                    event="stage_correlate_timeout",
+                    correlate_timeout_s=correlate_timeout_s,
+                )
+                finalize_failed("correlate_timeout", timeout_err, stage_name="correlate")
+            else:
+                raise
+        except Exception as correlate_report_err:
+            failed_stage = scan_state.get("current_stage", "correlate")
+            add_log(
+                f"❌ stage {failed_stage} failure: {correlate_report_err}",
+                "error",
+                stage=failed_stage,
+                event="stage_correlate_report_error",
+                error=str(correlate_report_err),
+            )
+            finalize_failed("correlate_report_failed", correlate_report_err, stage_name=failed_stage)
 
     except Exception as e:
-        scan_state["error"] = str(e)[:500]
         add_log(
             f"🔥 Erreur Critique: {str(e)}",
             "critical",
             stage=scan_state.get("current_stage"),
             event="scan_error",
-            error=scan_state.get("error"),
+            error=str(e)[:500],
         )
         if isinstance(e, TimeoutError):
             add_log(
@@ -3087,17 +3257,17 @@ def run_scan(
                 event="scan_global_timeout_reached",
                 global_timeout_s=global_timeout_s,
             )
-        scan_state["current_stage"] = "failed"
-        scan_state["should_stop"] = True
-        scan_state["is_scanning"] = False
-        mark_stage_terminal_state("failed")
+        finalize_failed("scan_failed", e, stage_name=scan_state.get("current_stage"))
     finally:
-        if current_stage:
+        if current_stage and scan_state.get("current_stage") not in {"failed", "stopped"}:
             end_scan_stage(current_stage, stage_started_at)
             current_stage, stage_started_at = None, None
-        scan_state["is_scanning"] = False
-        if scan_state.get("current_stage") == "failed":
+
+        if scan_state.get("current_stage") in {"completed", "failed", "stopped"}:
+            scan_state["is_scanning"] = False
+        if scan_state.get("current_stage") in {"failed", "stopped"}:
             scan_state["should_stop"] = True
+
         persist_scan_state(scan_state)
         # V3.0: Cleanup tmp_dir si clone Git
         if tmp_dir and os.path.exists(tmp_dir):

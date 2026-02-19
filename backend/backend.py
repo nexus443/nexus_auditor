@@ -2307,6 +2307,233 @@ def _estimate_tokens_and_chunks(file_sizes: Dict[str, int], chunk_budget_tokens:
     return tokens_total, chunks_total
 
 
+def _extract_model_size_billion(model_name: str) -> Optional[int]:
+    text = str(model_name or "").lower()
+    match = re.search(r"(\d+)\s*b\b", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_repo_stats_fast(
+    target: str,
+    resolved_mode_key: str,
+    mode_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Collecte rapide de stats repo sans lecture du contenu des fichiers.
+    Utilise uniquement os.walk + stat et les mêmes règles d'exclusion que le scan.
+    """
+    extensions = tuple(mode_config.get("file_extensions") or ())
+    max_file_size_bytes = get_max_scan_file_bytes()
+    reason_counts: Dict[str, int] = {}
+
+    def bump(reason: str, count: int = 1):
+        reason_counts[reason] = reason_counts.get(reason, 0) + max(0, int(count))
+
+    if target.startswith(("http://", "https://", "git@")):
+        bump("remote_target_partial_stats")
+        return {
+            "total_files": 0,
+            "analyzable_files": 0,
+            "excluded_files": 0,
+            "total_bytes_est": 0,
+            "excluded_reasons": [{"reason": "remote_target_partial_stats", "count": 1}],
+            "partial": True,
+            "partial_reason": "remote_target_not_scanned_locally",
+        }
+
+    if not target or not os.path.exists(target):
+        bump("target_not_found")
+        return {
+            "total_files": 0,
+            "analyzable_files": 0,
+            "excluded_files": 0,
+            "total_bytes_est": 0,
+            "excluded_reasons": [{"reason": "target_not_found", "count": 1}],
+            "partial": True,
+            "partial_reason": "target_path_not_found",
+        }
+
+    total_files = 0
+    analyzable_files = 0
+    excluded_files = 0
+    total_bytes_est = 0
+
+    for root, dirs, filenames in os.walk(target):
+        excluded_dirs = [d for d in dirs if d in SCAN_EXCLUDE_DIRS]
+        if excluded_dirs:
+            bump("excluded_dir", len(excluded_dirs))
+        dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDE_DIRS]
+
+        for filename in filenames:
+            total_files += 1
+            full_path = os.path.join(root, filename)
+            file_size = 0
+            try:
+                file_size = max(0, int(os.path.getsize(full_path)))
+            except OSError:
+                bump("stat_error")
+            total_bytes_est += file_size
+
+            if is_excluded_scan_filename(filename):
+                excluded_files += 1
+                bump("excluded_filename_policy")
+                continue
+            if not should_scan_file(filename, resolved_mode_key, extensions):
+                excluded_files += 1
+                bump("mode_extension_filter")
+                continue
+            if max_file_size_bytes > 0 and file_size > max_file_size_bytes:
+                excluded_files += 1
+                bump("oversized_file")
+                continue
+            analyzable_files += 1
+
+    top_reasons = sorted(reason_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    excluded_reasons = [{"reason": reason, "count": count} for reason, count in top_reasons]
+    return {
+        "total_files": total_files,
+        "analyzable_files": analyzable_files,
+        "excluded_files": excluded_files,
+        "total_bytes_est": total_bytes_est,
+        "excluded_reasons": excluded_reasons,
+        "partial": False,
+        "partial_reason": None,
+    }
+
+
+def probe_ollama_context(base_url: str, profile_config: Dict[str, Any]) -> Dict[str, Any]:
+    mode = "local" if is_local_ollama_base_url(base_url) else "remote"
+    endpoint = f"{str(base_url).rstrip('/')}/api/tags"
+    reachable = False
+    tags: List[str] = []
+    try:
+        response = requests.get(endpoint, timeout=(2, 4))
+        if response.status_code == 200:
+            reachable = True
+            payload = response.json() if callable(getattr(response, "json", None)) else {}
+            tags = [str(m.get("name", "")).strip() for m in payload.get("models", []) if isinstance(m, dict)][:10]
+    except Exception:
+        reachable = False
+        tags = []
+
+    return {
+        "mode": mode,
+        "base_url": base_url,
+        "model": profile_config.get("model"),
+        "reachable": reachable,
+        "tags": tags,
+    }
+
+
+def build_scan_preflight_summary(
+    target: str,
+    profile_key: str,
+    mode_key: str,
+    ollama_mode: str = "auto",
+    ollama_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a stable and fast preflight summary.
+
+    Response schema:
+    {
+      "repo_stats": {
+        "total_files": int,
+        "analyzable_files": int,
+        "excluded_files": int,
+        "total_bytes_est": int,
+        "excluded_reasons": [{"reason": str, "count": int}],
+      },
+      "profile_effective": {
+        "profile_name": str,
+        "target_chunk_tokens": int,
+        "connect_timeout_s": int,
+        "read_timeout_s": int,
+        "max_concurrency": int,
+        "global_scan_timeout_s": int,
+        "strict_evidence": bool,
+      },
+      "ollama_context": {
+        "mode": "local" | "remote",
+        "base_url": str,
+        "model": str,
+        "reachable": bool,
+        "tags": [str],
+      },
+      "warnings": [str]
+    }
+    """
+    profile = POWER_PROFILES.get(profile_key, POWER_PROFILES["balanced"])
+    mode = SCAN_MODES.get(mode_key, SCAN_MODES["deep"])
+    resolved_mode_key = MODE_CONTROLLER.resolve_mode_key(mode_key=mode_key, mode_config=mode)
+    resolved_ollama_base = get_ollama_base_url(ollama_mode=ollama_mode, ollama_url=ollama_url)
+
+    remote_policy = compute_remote_safe_policy(profile_key, resolved_mode_key, resolved_ollama_base)
+    effective_mode = dict(mode)
+    if remote_policy.get("enabled"):
+        effective_mode["target_chunk_tokens"] = int(remote_policy.get("target_chunk_tokens", 3000))
+        effective_mode["max_time_per_file"] = max(
+            int(mode.get("max_time_per_file", 60)),
+            int(remote_policy.get("file_deadline_s", 240)),
+        )
+
+    llm_plan = BUDGET_CONTROLLER.compute_plan(
+        profile_key=profile_key,
+        mode_key=resolved_mode_key,
+        profile_config=profile,
+        mode_config=mode,
+        ollama_mode=ollama_mode,
+    )
+    llm_plan = apply_remote_safe_budget_overrides(llm_plan, remote_policy)
+
+    repo_stats = collect_repo_stats_fast(target, resolved_mode_key, effective_mode)
+    chunk_tokens = int(
+        effective_mode.get("target_chunk_tokens")
+        or compute_chunk_token_budget(profile, effective_mode)
+    )
+    global_scan_timeout_s = resolve_global_scan_timeout_s(profile_key, profile)
+    ollama_context = probe_ollama_context(resolved_ollama_base, profile)
+
+    warnings: List[str] = []
+    if not is_local_ollama_base_url(resolved_ollama_base):
+        warnings.append("Remote URL seems proxied; long requests may 524")
+    model_size = _extract_model_size_billion(str(profile.get("model", "")))
+    if profile_key == "eco" and model_size is not None and model_size > 8:
+        warnings.append("Eco profile with model > 8B may be slow")
+    if repo_stats.get("partial"):
+        warnings.append("Target is remote or unavailable; repo stats are partial")
+    if repo_stats.get("total_files", 0) > 5000 or repo_stats.get("total_bytes_est", 0) > 500 * 1024 * 1024:
+        warnings.append("Repo very large; consider Deep mode only on server")
+    if not ollama_context.get("reachable", False):
+        warnings.append("Ollama endpoint is not reachable from backend")
+
+    return {
+        "repo_stats": {
+            "total_files": int(repo_stats.get("total_files", 0)),
+            "analyzable_files": int(repo_stats.get("analyzable_files", 0)),
+            "excluded_files": int(repo_stats.get("excluded_files", 0)),
+            "total_bytes_est": int(repo_stats.get("total_bytes_est", 0)),
+            "excluded_reasons": list(repo_stats.get("excluded_reasons", [])),
+        },
+        "profile_effective": {
+            "profile_name": profile_key,
+            "target_chunk_tokens": chunk_tokens,
+            "connect_timeout_s": int(llm_plan.get("connect_timeout_s", 0)),
+            "read_timeout_s": int(llm_plan.get("read_timeout_s", llm_plan.get("timeout_s", 0))),
+            "max_concurrency": int(llm_plan.get("concurrency", 1)),
+            "global_scan_timeout_s": int(global_scan_timeout_s),
+            "strict_evidence": bool(STRICT_EVIDENCE),
+        },
+        "ollama_context": ollama_context,
+        "warnings": warnings,
+    }
+
+
 def build_scan_preflight(
     target: str,
     profile_key: str,
@@ -2968,6 +3195,49 @@ async def scan_preflight(request: ScanRequest):
             "warning",
             stage="normalize",
             event="preflight_error",
+        )
+        return {"success": False, "message": f"Preflight impossible: {str(e)[:200]}"}
+
+
+@app.get("/scan/preflight")
+async def scan_preflight_get(
+    target: Optional[str] = None,
+    profile: str = "balanced",
+    mode: str = "deep",
+    ollama_mode: str = "auto",
+    ollama_url: Optional[str] = None,
+):
+    """
+    Fast preflight endpoint.
+
+    Query parameters:
+    - target: local path or git URL. If absent, fallback to latest scan target_dir or current directory.
+    - profile: eco|balanced|elite|titan
+    - mode: rapid|deep|devsecops
+    - ollama_mode: auto|remote
+    - ollama_url: explicit remote URL when ollama_mode=remote
+    """
+    resolved_target = target
+    if not resolved_target:
+        latest_state = load_scan_state_or_latest()
+        resolved_target = latest_state.get("target_dir") or os.getcwd()
+
+    try:
+        preflight = build_scan_preflight_summary(
+            target=str(resolved_target),
+            profile_key=profile,
+            mode_key=mode,
+            ollama_mode=ollama_mode,
+            ollama_url=ollama_url,
+        )
+        scan_state["preflight"] = preflight
+        return {"success": True, "preflight": preflight}
+    except Exception as e:
+        add_log(
+            f"⚠️ GET preflight impossible: {str(e)[:200]}",
+            "warning",
+            stage="normalize",
+            event="preflight_get_error",
         )
         return {"success": False, "message": f"Preflight impossible: {str(e)[:200]}"}
 

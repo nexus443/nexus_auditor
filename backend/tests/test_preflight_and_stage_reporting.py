@@ -5,6 +5,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 if "requests" not in sys.modules:
     requests_stub = types.ModuleType("requests")
@@ -215,6 +216,106 @@ class PreflightAndStageReportingTests(unittest.TestCase):
         report = backend_module.scan_state["stage_report"]
         self.assertEqual(report["terminal_state"], "completed")
         self.assertEqual(report["stage_status"]["report"], "completed")
+
+    def test_preflight_repo_stats(self):
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"models": [{"name": "qwen2.5-coder:14b"}]}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_env = os.environ.get("NEXUS_MAX_SCAN_FILE_BYTES")
+            os.environ["NEXUS_MAX_SCAN_FILE_BYTES"] = "128"
+            try:
+                os.makedirs(os.path.join(tmp_dir, "src"), exist_ok=True)
+                os.makedirs(os.path.join(tmp_dir, "node_modules", "leftpad"), exist_ok=True)
+
+                with open(os.path.join(tmp_dir, "src", "app.py"), "w", encoding="utf-8") as f:
+                    f.write("def ok():\n    return 1\n")
+                with open(os.path.join(tmp_dir, "src", "tmp.backup.py"), "w", encoding="utf-8") as f:
+                    f.write("def backup():\n    return 0\n")
+                with open(os.path.join(tmp_dir, "src", "notes.txt"), "w", encoding="utf-8") as f:
+                    f.write("notes\n")
+                with open(os.path.join(tmp_dir, "src", "huge.py"), "w", encoding="utf-8") as f:
+                    f.write("x" * 1024)
+                with open(os.path.join(tmp_dir, "node_modules", "leftpad", "index.js"), "w", encoding="utf-8") as f:
+                    f.write("module.exports = {}\n")
+
+                with patch.object(backend_module.requests, "get", return_value=FakeResponse()):
+                    payload = backend_module.build_scan_preflight_summary(
+                        target=tmp_dir,
+                        profile_key="balanced",
+                        mode_key="deep",
+                        ollama_mode="auto",
+                        ollama_url=None,
+                    )
+            finally:
+                if original_env is None:
+                    os.environ.pop("NEXUS_MAX_SCAN_FILE_BYTES", None)
+                else:
+                    os.environ["NEXUS_MAX_SCAN_FILE_BYTES"] = original_env
+
+        repo_stats = payload["repo_stats"]
+        self.assertGreaterEqual(repo_stats["total_files"], 4)
+        self.assertGreaterEqual(repo_stats["analyzable_files"], 1)
+        self.assertGreaterEqual(repo_stats["excluded_files"], 2)
+        self.assertGreater(repo_stats["total_bytes_est"], 0)
+        self.assertIsInstance(repo_stats["excluded_reasons"], list)
+        self.assertLessEqual(len(repo_stats["excluded_reasons"]), 5)
+
+    def test_preflight_profile_params(self):
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"models": [{"name": "qwen2.5-coder:32b"}, {"name": "qwen2.5-coder:14b"}]}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(os.path.join(tmp_dir, "main.py"), "w", encoding="utf-8") as f:
+                f.write("def run():\n    return True\n")
+
+            with patch.object(backend_module.requests, "get", return_value=FakeResponse()):
+                payload = backend_module.build_scan_preflight_summary(
+                    target=tmp_dir,
+                    profile_key="elite",
+                    mode_key="deep",
+                    ollama_mode="auto",
+                    ollama_url=None,
+                )
+
+        profile_effective = payload["profile_effective"]
+        ollama_context = payload["ollama_context"]
+        self.assertEqual(profile_effective["profile_name"], "elite")
+        self.assertGreater(profile_effective["target_chunk_tokens"], 0)
+        self.assertGreater(profile_effective["connect_timeout_s"], 0)
+        self.assertGreater(profile_effective["read_timeout_s"], 0)
+        self.assertGreaterEqual(profile_effective["max_concurrency"], 1)
+        self.assertGreater(profile_effective["global_scan_timeout_s"], 0)
+        self.assertEqual(profile_effective["strict_evidence"], backend_module.STRICT_EVIDENCE)
+        self.assertTrue(ollama_context["reachable"])
+        self.assertGreaterEqual(len(ollama_context["tags"]), 1)
+
+    def test_preflight_warnings(self):
+        with patch.dict(
+            backend_module.POWER_PROFILES,
+            {"eco": {**backend_module.POWER_PROFILES["eco"], "model": "qwen2.5-coder:14b"}},
+            clear=False,
+        ):
+            payload = backend_module.build_scan_preflight_summary(
+                target="https://github.com/example/repo.git",
+                profile_key="eco",
+                mode_key="deep",
+                ollama_mode="remote",
+                ollama_url="https://proxy.runpod.io",
+            )
+
+        warnings = payload["warnings"]
+        self.assertTrue(any("524" in w for w in warnings))
+        self.assertTrue(any("Eco profile with model > 8B" in w for w in warnings))
+        self.assertTrue(any("partial" in w.lower() for w in warnings))
 
 
 if __name__ == "__main__":

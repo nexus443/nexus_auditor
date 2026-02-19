@@ -1464,11 +1464,27 @@ export default function App() {
 
 // === PREFLIGHT VIEW COMPONENT ===
 
+// Static warning hints map — avoids dynamic class generation
+const WARNING_HINTS = {
+   'Remote URL seems proxied': 'Les proxies Cloudflare (524) peuvent couper les connexions longues (>100s). Préférez une connexion directe ou réduisez le timeout read.',
+   'Eco profile with model > 8B': 'Le profil Eco est optimisé pour des modèles légers (≤8B). Accuracy-first: passez en Balanced ou Elite pour des modèles plus grands.',
+   'Target is remote or unavailable': 'Le dépôt distant n\'a pas pu être cloné pour l\'estimation. Les stats sont partielles; la taille réelle peut différer.',
+   'Repo very large': 'Dépôt volumineux (>5000 fichiers ou >500 Mo). Le mode Deep peut être très lent; envisagez d\'exclure des dossiers inutiles ou de passer sur serveur dédié.',
+   'Ollama endpoint is not reachable': 'Le backend ne peut pas joindre Ollama. Vérifiez que le service est démarré et que l\'URL est correcte (mode auto = localhost:11434).',
+};
+
+function getWarningHint(w) {
+   const key = Object.keys(WARNING_HINTS).find(k => w.includes(k));
+   return key ? WARNING_HINTS[key] : null;
+}
+
 function PreflightView({ data, target, profile, scanMode, theme, onBack, onStart }) {
+   const [expandedHint, setExpandedHint] = React.useState(null);
+
    const card = `rounded-xl border p-5 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`;
-   const label = `text-xs font-semibold uppercase tracking-wider ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`;
-   const value = `text-sm font-mono ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`;
-   const dimText = `text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`;
+   const lbl = `text-xs font-semibold uppercase tracking-wider ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`;
+   const val = `text-sm font-mono ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`;
+   const dimTxt = `text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`;
 
    const { repo_stats: rs, profile_effective: pe, ollama_context: oc, warnings = [] } = data;
 
@@ -1479,74 +1495,105 @@ function PreflightView({ data, target, profile, scanMode, theme, onBack, onStart
       return `${(b / (1024 * 1024)).toFixed(1)} MB`;
    };
 
-   const MODE_LABELS = { rapid: 'Rapide', deep: 'Profond', devsecops: 'DevSecOps' };
-   const PROFILE_LABELS = { eco: 'Eco', balanced: 'Balanced', elite: 'Elite', titan: 'Titan' };
+   const PF_MODE_LABELS = { rapid: 'Rapide', deep: 'Profond', devsecops: 'DevSecOps' };
+   const PF_PROFILE_LABELS = { eco: 'Eco', balanced: 'Balanced', elite: 'Elite', titan: 'Titan' };
+
+   const isEco = profile === 'eco';
+   const coverageRatio = rs.total_files > 0 ? Math.round((rs.analyzable_files / rs.total_files) * 100) : 0;
 
    return (
-      <div className="max-w-4xl mx-auto space-y-6">
+      <div className="max-w-4xl mx-auto space-y-5">
          {/* Header */}
-         <div className="flex items-center justify-between">
-            <div>
-               <h2 className="text-xl font-bold flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-indigo-400" />
-                  Preflight — Analyse de pré-scan
-               </h2>
-               <p className={`text-sm mt-1 font-mono truncate max-w-lg ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
-                  {target} &nbsp;·&nbsp; {PROFILE_LABELS[profile] || profile} &nbsp;·&nbsp; {MODE_LABELS[scanMode] || scanMode}
-               </p>
-            </div>
+         <div>
+            <h2 className="text-xl font-bold flex items-center gap-2">
+               <Layers className="w-5 h-5 text-indigo-400" />
+               Preflight — Revue pré-scan
+            </h2>
+            <p className={`text-sm mt-1 font-mono truncate max-w-xl ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
+               {target} &nbsp;·&nbsp; {PF_PROFILE_LABELS[profile] || profile} &nbsp;·&nbsp; {PF_MODE_LABELS[scanMode] || scanMode}
+            </p>
          </div>
 
-         {/* Warnings banner */}
+         {/* Warnings — per-item with expandable hint */}
          {warnings.length > 0 && (
-            <div className={`rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 flex items-start gap-3`}>
-               <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
-               <div>
-                  <p className="text-sm font-semibold text-yellow-400 mb-1">{warnings.length} avertissement{warnings.length > 1 ? 's' : ''}</p>
-                  <ul className="space-y-0.5">
-                     {warnings.map((w, i) => (
-                        <li key={i} className={`text-xs ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>• {w}</li>
-                     ))}
-                  </ul>
+            <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 space-y-2">
+               <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" />
+                  <p className="text-sm font-semibold text-yellow-400">{warnings.length} avertissement{warnings.length > 1 ? 's' : ''}</p>
                </div>
+               {warnings.map((w, i) => {
+                  const hint = getWarningHint(w);
+                  const isOpen = expandedHint === i;
+                  return (
+                     <div key={i} className={`rounded-lg border px-3 py-2 ${theme === 'dark' ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-200'}`}>
+                        <div className="flex items-start gap-2">
+                           <span className={`text-xs flex-1 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>• {w}</span>
+                           {hint && (
+                              <button
+                                 onClick={() => setExpandedHint(isOpen ? null : i)}
+                                 className={`text-[10px] shrink-0 px-1.5 py-0.5 rounded border transition-colors ${isOpen
+                                    ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-400'
+                                    : theme === 'dark' ? 'border-slate-700 text-slate-500 hover:text-slate-300' : 'border-slate-300 text-slate-500 hover:text-slate-700'
+                                 }`}
+                                 title="Pourquoi ?"
+                              >
+                                 Pourquoi ?
+                              </button>
+                           )}
+                        </div>
+                        {isOpen && hint && (
+                           <p className={`text-[11px] mt-1.5 leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{hint}</p>
+                        )}
+                     </div>
+                  );
+               })}
             </div>
          )}
 
-         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Repo Stats */}
             <div className={card}>
                <div className="flex items-center gap-2 mb-4">
                   <Database className="w-4 h-4 text-indigo-400" />
-                  <h3 className="text-sm font-semibold">Statistiques du dépôt</h3>
+                  <h3 className="text-sm font-semibold">Dépôt</h3>
+                  <span className={`ml-auto text-xs font-mono px-2 py-0.5 rounded ${theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
+                     {fmtBytes(rs.total_bytes_est)}
+                  </span>
                </div>
-               <div className="grid grid-cols-3 gap-3 mb-4">
-                  <div className={`rounded-lg p-3 text-center ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-50'}`}>
-                     <div className="text-xl font-bold text-indigo-400">{rs.total_files}</div>
-                     <div className={dimText}>Total</div>
+
+               {/* Coverage bar */}
+               <div className="mb-4">
+                  <div className="flex justify-between text-xs mb-1">
+                     <span className={dimTxt}>Couverture d'analyse</span>
+                     <span className="font-semibold text-emerald-400">{coverageRatio}%</span>
                   </div>
-                  <div className={`rounded-lg p-3 text-center ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-50'}`}>
-                     <div className="text-xl font-bold text-emerald-400">{rs.analyzable_files}</div>
-                     <div className={dimText}>Analysables</div>
+                  <div className={`h-2 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                     <div className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-500" style={{ width: `${coverageRatio}%` }} />
                   </div>
-                  <div className={`rounded-lg p-3 text-center ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-50'}`}>
-                     <div className="text-xl font-bold text-slate-400">{rs.excluded_files}</div>
-                     <div className={dimText}>Exclus</div>
+                  <div className="flex justify-between mt-1">
+                     <span className={`${dimTxt} text-indigo-400`}>{rs.analyzable_files} analysables</span>
+                     <span className={dimTxt}>{rs.excluded_files} exclus / {rs.total_files} total</span>
                   </div>
                </div>
-               <div className="flex items-center justify-between mb-3">
-                  <span className={label}>Taille estimée</span>
-                  <span className={value}>{fmtBytes(rs.total_bytes_est)}</span>
-               </div>
+
                {rs.excluded_reasons && rs.excluded_reasons.length > 0 && (
                   <div>
-                     <p className={`${label} mb-2`}>Top raisons d'exclusion</p>
+                     <p className={`${lbl} mb-2`}>Top exclusions</p>
                      <ul className="space-y-1">
-                        {rs.excluded_reasons.slice(0, 5).map((r, i) => (
-                           <li key={i} className="flex items-center justify-between">
-                              <span className={`text-xs truncate max-w-[200px] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{r.reason}</span>
-                              <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>{r.count}</span>
-                           </li>
-                        ))}
+                        {rs.excluded_reasons.slice(0, 5).map((r, i) => {
+                           const pct = rs.excluded_files > 0 ? Math.round((r.count / rs.excluded_files) * 100) : 0;
+                           return (
+                              <li key={i} className="flex items-center gap-2">
+                                 <span className={`text-xs flex-1 truncate ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{r.reason}</span>
+                                 <div className="flex items-center gap-1.5">
+                                    <div className={`w-12 h-1 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                                       <div className="h-full bg-slate-500 rounded-full" style={{ width: `${pct}%` }} />
+                                    </div>
+                                    <span className={`text-[10px] font-mono w-6 text-right ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`}>{r.count}</span>
+                                 </div>
+                              </li>
+                           );
+                        })}
                      </ul>
                   </div>
                )}
@@ -1558,84 +1605,105 @@ function PreflightView({ data, target, profile, scanMode, theme, onBack, onStart
                   <Cpu className="w-4 h-4 text-violet-400" />
                   <h3 className="text-sm font-semibold">Profil effectif</h3>
                   <span className={`ml-auto text-xs px-2 py-0.5 rounded border ${theme === 'dark' ? 'border-violet-500/30 bg-violet-500/10 text-violet-400' : 'border-violet-300 bg-violet-50 text-violet-600'}`}>
-                     {PROFILE_LABELS[pe.profile_name] || pe.profile_name}
+                     {PF_PROFILE_LABELS[pe.profile_name] || pe.profile_name}
                   </span>
                </div>
                <div className="space-y-2.5">
                   {[
-                     { key: 'Chunk tokens', val: pe.target_chunk_tokens?.toLocaleString() },
-                     { key: 'Timeout connect', val: `${pe.connect_timeout_s}s` },
-                     { key: 'Timeout read', val: `${pe.read_timeout_s}s` },
-                     { key: 'Concurrence', val: pe.max_concurrency },
-                     { key: 'Timeout global', val: `${Math.round(pe.global_scan_timeout_s / 60)} min` },
-                     { key: 'Evidence stricte', val: pe.strict_evidence ? 'Oui' : 'Non' },
-                  ].map(({ key, val }) => (
-                     <div key={key} className="flex items-center justify-between">
-                        <span className={label}>{key}</span>
-                        <span className={value}>{val}</span>
+                     { k: 'Chunk tokens',    v: pe.target_chunk_tokens?.toLocaleString(), tip: 'Taille max d\'un bloc de code analysé par l\'IA' },
+                     { k: 'Timeout connect', v: `${pe.connect_timeout_s}s`,               tip: 'Délai d\'établissement de la connexion Ollama' },
+                     { k: 'Timeout read',    v: `${pe.read_timeout_s}s`,                  tip: 'Délai max pour recevoir la réponse complète' },
+                     { k: 'Concurrence',     v: pe.max_concurrency,                       tip: 'Nombre de fichiers analysés en parallèle' },
+                     { k: 'Timeout global',  v: `${Math.round(pe.global_scan_timeout_s / 60)} min`, tip: 'Durée max totale du scan avant interruption' },
+                     { k: 'Evidence stricte',v: pe.strict_evidence ? 'Oui' : 'Non',       tip: 'Si Oui, toute vulnérabilité sans preuve de code est ignorée' },
+                  ].map(({ k, v, tip }) => (
+                     <div key={k} className="flex items-center justify-between gap-3" title={tip}>
+                        <span className={`${lbl} cursor-help`}>{k}</span>
+                        <span className={val}>{v}</span>
                      </div>
                   ))}
                </div>
+               {isEco && (
+                  <div className={`mt-3 p-2 rounded-lg text-[11px] flex items-start gap-2 ${theme === 'dark' ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                     <span className="shrink-0">💡</span>
+                     <span><strong>Eco · Accuracy-first:</strong> chunks plus petits, timeout court. Résultats solides mais moins exhaustifs que Elite/Titan.</span>
+                  </div>
+               )}
             </div>
 
             {/* Ollama Context */}
             <div className={card}>
                <div className="flex items-center gap-2 mb-4">
                   <Server className="w-4 h-4 text-cyan-400" />
-                  <h3 className="text-sm font-semibold">Contexte Ollama</h3>
-                  <span className={`ml-auto flex items-center gap-1 text-xs px-2 py-0.5 rounded border ${oc.reachable
+                  <h3 className="text-sm font-semibold">Ollama</h3>
+                  <span className={`ml-auto flex items-center gap-1 text-xs px-2 py-0.5 rounded border font-medium ${oc.reachable
                      ? theme === 'dark' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : 'border-emerald-300 bg-emerald-50 text-emerald-600'
                      : theme === 'dark' ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-red-300 bg-red-50 text-red-600'
                   }`}>
                      {oc.reachable ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                     {oc.reachable ? 'Joignable' : 'Non joignable'}
+                     {oc.reachable ? 'Joignable' : 'Hors ligne'}
                   </span>
                </div>
                <div className="space-y-2.5">
                   {[
-                     { key: 'Mode', val: oc.mode === 'local' ? 'Local' : 'Distant' },
-                     { key: 'Base URL', val: oc.base_url },
-                     { key: 'Modèle', val: oc.model },
-                  ].map(({ key, val }) => (
-                     <div key={key} className="flex items-center justify-between gap-4">
-                        <span className={label}>{key}</span>
-                        <span className={`text-xs font-mono truncate max-w-[200px] ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>{val || '—'}</span>
+                     { k: 'Mode',    v: oc.mode === 'local' ? 'Local (auto)' : 'Distant' },
+                     { k: 'URL',     v: oc.base_url },
+                     { k: 'Modèle', v: oc.model },
+                  ].map(({ k, v }) => (
+                     <div key={k} className="flex items-center justify-between gap-4">
+                        <span className={lbl}>{k}</span>
+                        <span className={`text-xs font-mono truncate max-w-[200px] ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>{v || '—'}</span>
                      </div>
                   ))}
                </div>
                {oc.tags && oc.tags.length > 0 && (
                   <div className="mt-3">
-                     <p className={`${label} mb-1.5`}>Modèles disponibles</p>
+                     <p className={`${lbl} mb-1.5`}>Modèles dispo</p>
                      <div className="flex flex-wrap gap-1">
-                        {oc.tags.slice(0, 5).map((t, i) => (
+                        {oc.tags.slice(0, 6).map((t, i) => (
                            <span key={i} className={`text-[10px] px-2 py-0.5 rounded font-mono ${theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>{t}</span>
                         ))}
-                        {oc.tags.length > 5 && (
-                           <span className={`text-[10px] px-2 py-0.5 rounded ${theme === 'dark' ? 'bg-slate-800 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>+{oc.tags.length - 5}</span>
+                        {oc.tags.length > 6 && (
+                           <span className={`text-[10px] px-2 py-0.5 rounded ${theme === 'dark' ? 'bg-slate-800 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>+{oc.tags.length - 6}</span>
                         )}
                      </div>
                   </div>
                )}
+               {!oc.reachable && (
+                  <p className="mt-3 text-xs text-red-400 flex items-start gap-1.5">
+                     <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                     Non joignable — vérifiez que le service Ollama est actif avant de lancer.
+                  </p>
+               )}
             </div>
 
-            {/* Summary card */}
-            <div className={`${card} flex flex-col justify-between`}>
+            {/* Launch summary */}
+            <div className={`${card} flex flex-col justify-between gap-4`}>
                <div>
-                  <div className="flex items-center gap-2 mb-4">
+                  <div className="flex items-center gap-2 mb-3">
                      <CheckCircle className="w-4 h-4 text-emerald-400" />
-                     <h3 className="text-sm font-semibold">Prêt à scanner</h3>
+                     <h3 className="text-sm font-semibold">Récapitulatif</h3>
                   </div>
-                  <p className={`text-sm leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
-                     <span className="font-semibold text-emerald-400">{rs.analyzable_files}</span> fichier{rs.analyzable_files !== 1 ? 's' : ''} seront analysés
-                     avec le profil <span className="font-semibold">{PROFILE_LABELS[pe.profile_name] || pe.profile_name}</span> en mode <span className="font-semibold">{MODE_LABELS[scanMode] || scanMode}</span>.
-                  </p>
-                  {!oc.reachable && (
-                     <p className="mt-3 text-xs text-red-400 flex items-start gap-1">
-                        <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
-                        Ollama non joignable — le scan risque d'échouer.
-                     </p>
-                  )}
+                  <div className="space-y-2">
+                     {[
+                        { k: 'Fichiers à analyser', v: `${rs.analyzable_files} (${coverageRatio}% du dépôt)`, color: 'text-emerald-400' },
+                        { k: 'Profil',              v: `${PF_PROFILE_LABELS[pe.profile_name] || pe.profile_name}${isEco ? ' · accuracy-first' : ''}`, color: theme === 'dark' ? 'text-slate-200' : 'text-slate-800' },
+                        { k: 'Mode',                v: PF_MODE_LABELS[scanMode] || scanMode, color: theme === 'dark' ? 'text-slate-200' : 'text-slate-800' },
+                        { k: 'Timeout max',         v: `${Math.round(pe.global_scan_timeout_s / 60)} min`, color: theme === 'dark' ? 'text-slate-200' : 'text-slate-800' },
+                     ].map(({ k, v, color }) => (
+                        <div key={k} className="flex items-center justify-between">
+                           <span className={lbl}>{k}</span>
+                           <span className={`text-xs font-semibold ${color}`}>{v}</span>
+                        </div>
+                     ))}
+                  </div>
                </div>
+               {warnings.length === 0 && oc.reachable && (
+                  <div className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg ${theme === 'dark' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-800/30' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                     <CheckCircle className="w-3 h-3 shrink-0" />
+                     Tout est prêt — aucun avertissement.
+                  </div>
+               )}
             </div>
          </div>
 
@@ -1648,15 +1716,22 @@ function PreflightView({ data, target, profile, scanMode, theme, onBack, onStart
                   : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700'
                }`}
             >
-               <ArrowLeft className="w-4 h-4" /> Retour
+               <ArrowLeft className="w-4 h-4" /> Retour config
             </button>
 
-            <button
-               onClick={onStart}
-               className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-2.5 rounded-xl font-medium shadow-lg shadow-indigo-600/20 transition-all flex items-center gap-2"
-            >
-               <Shield className="w-4 h-4" /> Démarrer l'Audit
-            </button>
+            <div className="flex items-center gap-3">
+               {!oc.reachable && (
+                  <span className="text-xs text-red-400 flex items-center gap-1">
+                     <AlertTriangle className="w-3 h-3" /> Ollama hors ligne
+                  </span>
+               )}
+               <button
+                  onClick={onStart}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-2.5 rounded-xl font-medium shadow-lg shadow-indigo-600/20 transition-all flex items-center gap-2"
+               >
+                  <Shield className="w-4 h-4" /> Démarrer l'Audit
+               </button>
+            </div>
          </div>
       </div>
    );

@@ -11,6 +11,47 @@ import ExecutiveView from './components/ExecutiveView.jsx';
 
 const API_URL = "/api";
 
+// PIPELINE STAGES (static)
+const PIPELINE_STAGES = [
+   { key: 'normalize', label: 'Normalize', icon: '📋', idx: 1 },
+   { key: 'index',     label: 'Index',     icon: '🔍', idx: 2 },
+   { key: 'analyze',   label: 'Analyze',   icon: '🧠', idx: 3 },
+   { key: 'correlate', label: 'Correlate', icon: '🔗', idx: 4 },
+   { key: 'report',    label: 'Report',    icon: '📊', idx: 5 },
+];
+
+// LOG CLASSIFICATION
+// Error = runtime failures (timeout, http5xx, exception, unreachable)
+// Warn  = findings or policy warnings
+// Info  = normal progress
+const LOG_RUNTIME_ERROR_TOKENS = ['timeout', 'http 5', 'http5', 'exception', 'unreachable', 'connection refused', 'traceback', 'oserror', 'ioerror'];
+const LOG_WARN_TOKENS = ['⚠️', 'warning', '⚠', 'filtered', 'prudent', 'skipped', 'excluded'];
+const LOG_ERROR_TOKENS = ['❌', 'error', '🚨', 'critical', 'failed', 'failure'];
+
+function classifyLog(log) {
+   const msg = (log.msg || '').toLowerCase();
+   if (LOG_RUNTIME_ERROR_TOKENS.some(t => msg.includes(t))) return 'error';
+   if (LOG_ERROR_TOKENS.some(t => msg.includes(t))) return 'error';
+   if (LOG_WARN_TOKENS.some(t => msg.includes(t))) return 'warn';
+   if (log.type === 'success') return 'info';
+   return 'info';
+}
+
+// Static color classes for log levels
+const LOG_COLOR_CLASSES = {
+   error: 'text-red-400',
+   warn:  'text-yellow-400',
+   info:  'text-slate-300',
+};
+
+// Log filter button definitions (static)
+const LOG_FILTER_LEVELS = [
+   { key: 'all',   label: 'ALL',   activeClass: 'bg-slate-700 text-white' },
+   { key: 'info',  label: 'INFO',  activeClass: 'bg-indigo-600 text-white' },
+   { key: 'warn',  label: 'WARN',  activeClass: 'bg-yellow-600 text-white' },
+   { key: 'error', label: 'ERROR', activeClass: 'bg-red-600 text-white' },
+];
+
 // SEVERITY STYLES 
 const SEVERITY_STYLES = {
    CRITICAL: { badge: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertOctagon, color: 'text-red-500', border: 'border-red-500' },
@@ -100,8 +141,18 @@ export default function App() {
       lastCheck: null
    });
 
-   // Log filtering for advanced log viewer
+   // Log filtering / search for advanced log viewer
    const [logFilter, setLogFilter] = useState('all'); // 'all' | 'info' | 'warn' | 'error'
+   const [logSearch, setLogSearch] = useState('');
+
+   // Running diagnostics
+   const [pollingState, setPollingState] = useState('idle'); // 'ok' | 'reconnecting' | 'idle'
+   const [stageTimers, setStageTimers] = useState({}); // { stageName: startTimestamp }
+   const [lastStage, setLastStage] = useState(null);
+   const [stuckWarning, setStuckWarning] = useState(null); // null | { stage, elapsed }
+
+   // Stuck thresholds per profile (seconds)
+   const STUCK_THRESHOLDS = { eco: 90, balanced: 180, elite: 300, titan: 600 };
 
    useEffect(() => {
       localStorage.setItem('theme', theme);
@@ -129,25 +180,70 @@ export default function App() {
    }, []);
 
    useEffect(() => {
-      let interval;
-      if (status.is_scanning || status.progress > 0) {
-         interval = setInterval(async () => {
-            try {
-               const res = await fetch(`${API_URL}/scan/status`);
-               const data = await res.json();
+      if (!status.is_scanning && status.progress === 0) return;
+
+      let isCancelled = false;
+      let backoff = 1000;
+
+      const poll = async () => {
+         if (isCancelled) return;
+         try {
+            const res = await fetch(`${API_URL}/scan/status`, { signal: AbortSignal.timeout(5000) });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (!isCancelled) {
                setStatus(data);
+               setPollingState('ok');
+               backoff = 1000; // reset backoff on success
+
+               // Stage tracking for stuck detector
+               const currentStage = data.current_stage || null;
+               setLastStage(prev => {
+                  if (currentStage && currentStage !== prev) {
+                     setStageTimers(t => ({ ...t, [currentStage]: Date.now() }));
+                     setStuckWarning(null);
+                  }
+                  return currentStage;
+               });
 
                // Auto-switch to results view when scan completes
-               if (!data.is_scanning && data.progress === 100 && view === 'running') {
+               if (!data.is_scanning && data.progress === 100) {
                   setView('results');
                }
 
-               if (view === 'running' && activeTab === 'logs') scrollToBottom();
-            } catch (e) { console.error(e); }
-         }, 1000);
-      }
+               if (view === 'running') scrollToBottom();
+            }
+         } catch (e) {
+            if (!isCancelled) {
+               setPollingState('reconnecting');
+               backoff = Math.min(backoff * 2, 8000);
+            }
+         }
+         if (!isCancelled) setTimeout(poll, backoff);
+      };
+
+      poll();
+      return () => { isCancelled = true; };
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [status.is_scanning]);
+
+   // Stuck detector: check every 5s if current stage has stalled
+   useEffect(() => {
+      if (!status.is_scanning) return;
+      const threshold = (STUCK_THRESHOLDS[profile] || 180) * 1000;
+      const interval = setInterval(() => {
+         setStageTimers(timers => {
+            if (lastStage && timers[lastStage]) {
+               const elapsed = Date.now() - timers[lastStage];
+               if (elapsed > threshold) {
+                  setStuckWarning({ stage: lastStage, elapsed: Math.round(elapsed / 1000) });
+               }
+            }
+            return timers;
+         });
+      }, 5000);
       return () => clearInterval(interval);
-   }, [status.is_scanning, view, activeTab]);
+   }, [status.is_scanning, lastStage, profile]);
 
    useEffect(() => {
       loadHistory();
@@ -798,22 +894,65 @@ export default function App() {
                />
             )}
 
-            {/* === RUNNING VIEW (Claude logs + live stats) === */}
+            {/* === RUNNING VIEW === */}
             {view === 'running' && (
-               <div className="space-y-6">
+               <div className="space-y-4">
+
+                  {/* Reconnecting banner */}
+                  {pollingState === 'reconnecting' && (
+                     <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-yellow-400 text-sm">
+                        <Activity className="w-4 h-4 animate-spin shrink-0" />
+                        Reconnexion au backend… Le dernier état affiché est conservé.
+                     </div>
+                  )}
+
+                  {/* Stuck detector banner */}
+                  {stuckWarning && (
+                     <div className="flex items-start gap-3 px-4 py-3 rounded-lg border border-orange-500/40 bg-orange-500/10 text-orange-400 text-sm">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                           <p className="font-semibold">
+                              Étape <span className="font-mono">{stuckWarning.stage}</span> bloquée depuis {stuckWarning.elapsed}s
+                              (seuil {STUCK_THRESHOLDS[profile] || 180}s pour profil {profile})
+                           </p>
+                           <p className="text-xs mt-0.5 text-orange-300">Vérifiez qu'Ollama répond. Si le problème persiste, arrêtez et relancez.</p>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                           <button
+                              onClick={() => fetch(`${API_URL}/scan/status`).then(r => r.json()).then(d => { setStatus(d); toast.success('Status rafraîchi'); }).catch(() => toast.error('Impossible de rafraîchir'))}
+                              className="flex items-center gap-1 text-xs border border-orange-500/30 px-2 py-1 rounded hover:bg-orange-500/10"
+                           >
+                              <RotateCcw className="w-3 h-3" /> Retry
+                           </button>
+                           <button
+                              onClick={() => { navigator.clipboard.writeText(status.logs.map(l => `[${l.time}] ${l.msg}`).join('\n')); toast.success('Logs copiés'); }}
+                              className="flex items-center gap-1 text-xs border border-orange-500/30 px-2 py-1 rounded hover:bg-orange-500/10"
+                           >
+                              <Copy className="w-3 h-3" /> Logs
+                           </button>
+                           <button
+                              onClick={stopScan}
+                              className="flex items-center gap-1 text-xs border border-red-500/40 text-red-400 px-2 py-1 rounded hover:bg-red-500/10"
+                           >
+                              <XCircle className="w-3 h-3" /> Stop
+                           </button>
+                        </div>
+                     </div>
+                  )}
+
                   {/* Progress Card */}
-                  <div className={`rounded-2xl border p-6 shadow-xl ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                     <div className="flex justify-between items-end mb-4">
+                  <div className={`rounded-2xl border p-5 shadow-xl ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                     <div className="flex justify-between items-end mb-3">
                         <div>
                            <h2 className="text-lg font-bold flex items-center gap-2">
                               <Activity className="text-indigo-500 animate-pulse" />
-                              Scan en cours...
+                              Scan en cours…
                            </h2>
-                           <p className={`font-mono text-sm mt-1 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{status.current_file}</p>
+                           <p className={`font-mono text-sm mt-1 truncate max-w-lg ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{status.current_file}</p>
                         </div>
                         <div className="text-right">
                            <div className="text-2xl font-bold font-mono text-indigo-500">{Math.round(status.progress)}%</div>
-                           <div className="text-xs text-slate-400">Temps estimé: <span className="text-slate-300">{status.estimated_time}</span></div>
+                           <div className="text-xs text-slate-400">Estimé: <span className="text-slate-300">{status.estimated_time}</span></div>
                         </div>
                      </div>
                      <div className={`h-2 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
@@ -825,117 +964,131 @@ export default function App() {
                   </div>
 
                   {/* Pipeline Stages Timeline */}
-                  <div className="mb-6">
-                     <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                        <div className="flex items-center gap-2 mb-3">
-                           <Layers className="w-4 h-4 text-indigo-400" />
-                           <h3 className="text-sm font-semibold">Pipeline Progress</h3>
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                           {[
-                              { label: 'Normalize', icon: '📋', stage: 1 },
-                              { label: 'Index', icon: '🔍', stage: 2 },
-                              { label: 'Analyze', icon: '🧠', stage: 3 },
-                              { label: 'Correlate', icon: '🔗', stage: 4 },
-                              { label: 'Report', icon: '📊', stage: 5 }
-                           ].map((s, i) => {
-                              // Heuristic: deduce stage from progress
-                              const currentStage = Math.ceil((status.progress / 100) * 5);
-                              const isActive = currentStage === s.stage;
-                              const isDone = currentStage > s.stage;
+                  <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                     <div className="flex items-center gap-2 mb-3">
+                        <Layers className="w-4 h-4 text-indigo-400" />
+                        <h3 className="text-sm font-semibold">Pipeline</h3>
+                     </div>
+                     <div className="flex items-stretch gap-1">
+                        {PIPELINE_STAGES.map((s, i) => {
+                           const isActive = lastStage === s.key || (!lastStage && i === 0 && status.progress > 0);
+                           const heuristicStage = Math.ceil((status.progress / 100) * PIPELINE_STAGES.length);
+                           const isDone = heuristicStage > s.idx;
+                           const isStuck = stuckWarning?.stage === s.key;
+                           const elapsed = stageTimers[s.key] ? Math.round((Date.now() - stageTimers[s.key]) / 1000) : null;
 
-                              return (
-                                 <div key={i} className="flex-1">
-                                    <div className={`text-center p-2 rounded-lg border transition-all ${isDone
+                           return (
+                              <React.Fragment key={s.key}>
+                                 <div className={`flex-1 text-center p-2 rounded-lg border transition-all ${isStuck
+                                    ? 'bg-orange-500/10 border-orange-500/40 text-orange-400'
+                                    : isDone
                                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
                                        : isActive
                                           ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400 animate-pulse'
                                           : theme === 'dark' ? 'bg-slate-800 border-slate-700 text-slate-500' : 'bg-slate-100 border-slate-300 text-slate-400'
-                                       }`}>
-                                       <div className="text-lg mb-1">{s.icon}</div>
-                                       <div className="text-xs font-medium">{s.label}</div>
-                                       {isDone && <div className="text-[10px] mt-0.5">✓</div>}
-                                       {isActive && <div className="text-[10px] mt-0.5">...</div>}
-                                    </div>
-                                    {i < 4 && (
-                                       <div className={`h-0.5 mt-2 ${isDone ? 'bg-emerald-500' : 'bg-slate-700'}`} />
+                                    }`}>
+                                    <div className="text-base mb-0.5">{s.icon}</div>
+                                    <div className="text-[11px] font-medium">{s.label}</div>
+                                    {isDone && <div className="text-[9px] mt-0.5 text-emerald-400">✓</div>}
+                                    {isActive && !isDone && elapsed !== null && (
+                                       <div className="text-[9px] mt-0.5 font-mono">{elapsed}s</div>
                                     )}
+                                    {isStuck && <div className="text-[9px] mt-0.5">⚠</div>}
                                  </div>
-                              );
-                           })}
-                        </div>
+                                 {i < PIPELINE_STAGES.length - 1 && (
+                                    <div className={`w-3 flex items-center`}>
+                                       <div className={`w-full h-0.5 ${isDone ? 'bg-emerald-500' : theme === 'dark' ? 'bg-slate-700' : 'bg-slate-300'}`} />
+                                    </div>
+                                 )}
+                              </React.Fragment>
+                           );
+                        })}
                      </div>
                   </div>
 
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
                      {/* Terminal */}
                      <div className="lg:col-span-2">
-                        <div className="bg-slate-950 rounded-xl border border-slate-800 h-[400px] flex flex-col font-mono text-xs overflow-hidden shadow-2xl">
-                           <div className="px-4 py-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between">
-                              <div className="flex items-center gap-2 text-slate-400">
-                                 <Terminal size={14} /> Output Console
+                        <div className="bg-slate-950 rounded-xl border border-slate-800 h-[420px] flex flex-col font-mono text-xs overflow-hidden shadow-2xl">
+                           <div className="px-3 py-2 border-b border-slate-800 bg-slate-900/50 flex items-center gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5 text-slate-400 shrink-0">
+                                 <Terminal size={13} />
+                                 <span>Console</span>
                               </div>
-                              <div className="flex items-center gap-2">
-                                 {/* Log Filters */}
-                                 <div className="flex items-center gap-1 bg-slate-900 rounded px-1">
-                                    {['all', 'info', 'warn', 'error'].map(f => (
+                              {/* Log level filters with counts */}
+                              <div className="flex items-center gap-1 bg-slate-900 rounded px-1">
+                                 {LOG_FILTER_LEVELS.map(f => {
+                                    const count = f.key === 'all' ? status.logs.length : status.logs.filter(l => classifyLog(l) === f.key).length;
+                                    return (
                                        <button
-                                          key={f}
-                                          onClick={() => setLogFilter(f)}
-                                          className={`px-2 py-0.5 text-[10px] rounded transition-all ${logFilter === f
-                                             ? 'bg-indigo-600 text-white'
-                                             : 'text-slate-500 hover:text-slate-300'
-                                             }`}
+                                          key={f.key}
+                                          onClick={() => setLogFilter(f.key)}
+                                          className={`px-2 py-0.5 text-[10px] rounded transition-all flex items-center gap-1 ${logFilter === f.key ? f.activeClass : 'text-slate-500 hover:text-slate-300'}`}
                                        >
-                                          {f.toUpperCase()}
+                                          {f.label}
+                                          {count > 0 && <span className={`text-[9px] px-1 rounded ${logFilter === f.key ? 'bg-white/20' : 'bg-slate-800'}`}>{count}</span>}
                                        </button>
-                                    ))}
-                                 </div>
-                                 {/* Download Logs */}
-                                 <button
-                                    onClick={() => {
-                                       const logText = status.logs.map(l => `[${l.time}] ${l.msg}`).join('\n');
-                                       const blob = new Blob([logText], { type: 'text/plain' });
-                                       const url = URL.createObjectURL(blob);
-                                       const a = document.createElement('a');
-                                       a.href = url;
-                                       a.download = `nexus-scan-logs-${Date.now()}.txt`;
-                                       a.click();
-                                       URL.revokeObjectURL(url);
-                                       toast.success('Logs téléchargés');
-                                    }}
-                                    className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
-                                    title="Download logs"
-                                 >
-                                    <Download size={12} />
-                                 </button>
+                                    );
+                                 })}
                               </div>
+                              {/* Search */}
+                              <div className="relative flex-1 min-w-[100px]">
+                                 <Search className="absolute left-2 top-1 w-3 h-3 text-slate-500" />
+                                 <input
+                                    type="text"
+                                    value={logSearch}
+                                    onChange={e => setLogSearch(e.target.value)}
+                                    placeholder="Filtrer…"
+                                    className="w-full bg-slate-900 border border-slate-800 rounded pl-6 pr-2 py-0.5 text-[10px] text-slate-300 focus:outline-none focus:border-indigo-500"
+                                 />
+                              </div>
+                              {/* Copy all logs */}
+                              <button
+                                 onClick={() => { navigator.clipboard.writeText(status.logs.map(l => `[${l.time}] ${l.msg}`).join('\n')); toast.success('Logs copiés'); }}
+                                 className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
+                                 title="Copier tous les logs"
+                              >
+                                 <Copy size={12} />
+                              </button>
+                              {/* Download */}
+                              <button
+                                 onClick={() => {
+                                    const logText = status.logs.map(l => `[${l.time}] ${l.msg}`).join('\n');
+                                    const blob = new Blob([logText], { type: 'text/plain' });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url; a.download = `nexus-logs-${Date.now()}.txt`; a.click();
+                                    URL.revokeObjectURL(url);
+                                    toast.success('Logs téléchargés');
+                                 }}
+                                 className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
+                                 title="Télécharger logs"
+                              >
+                                 <Download size={12} />
+                              </button>
                            </div>
-                           <div className="flex-1 p-4 overflow-y-auto space-y-1 custom-scrollbar">
+                           <div className="flex-1 p-3 overflow-y-auto space-y-0.5 custom-scrollbar">
                               {status.logs.filter(log => {
-                                 if (logFilter === 'all') return true;
-                                 const msg = log.msg.toLowerCase();
-                                 if (logFilter === 'info') return !msg.includes('⚠️') && !msg.includes('❌') && !msg.includes('error');
-                                 if (logFilter === 'warn') return msg.includes('⚠️') || msg.includes('warning');
-                                 if (logFilter === 'error') return msg.includes('❌') || msg.includes('error') || msg.includes('critical');
+                                 const cls = classifyLog(log);
+                                 if (logFilter !== 'all' && cls !== logFilter) return false;
+                                 if (logSearch && !log.msg.toLowerCase().includes(logSearch.toLowerCase())) return false;
                                  return true;
-                              }).map((log, i) => (
-                                 <div
-                                    key={i}
-                                    className="flex gap-3 opacity-90 hover:bg-slate-900/50 p-0.5 group"
-                                    onClick={() => {
-                                       navigator.clipboard.writeText(`[${log.time}] ${log.msg}`);
-                                       toast.success('Log copié');
-                                    }}
-                                    title="Click to copy"
-                                 >
-                                    <span className="text-slate-600 shrink-0">[{log.time}]</span>
-                                    <span className={log.type === 'success' ? 'text-emerald-400' : 'text-slate-300'}>
-                                       {log.type === 'success' ? '✔ ' : '> '} {log.msg}
-                                    </span>
-                                    <Copy className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
-                                 </div>
-                              ))}
+                              }).map((log, i) => {
+                                 const cls = classifyLog(log);
+                                 const colorClass = LOG_COLOR_CLASSES[cls] || 'text-slate-300';
+                                 return (
+                                    <div
+                                       key={i}
+                                       className="flex gap-3 hover:bg-slate-900/50 p-0.5 rounded group cursor-pointer"
+                                       onClick={() => { navigator.clipboard.writeText(`[${log.time}] ${log.msg}`); toast.success('Log copié'); }}
+                                       title="Click to copy"
+                                    >
+                                       <span className="text-slate-600 shrink-0 tabular-nums">[{log.time}]</span>
+                                       <span className={colorClass}>{log.msg}</span>
+                                       <Copy className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0" />
+                                    </div>
+                                 );
+                              })}
                               <div ref={logEndRef} />
                            </div>
                         </div>
@@ -943,23 +1096,18 @@ export default function App() {
 
                      {/* Live Stats */}
                      <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
-                           <div className={`p-4 rounded-xl border ${SEVERITY_STYLES.CRITICAL.badge} flex flex-col items-center justify-center bg-opacity-5`}>
-                              <span className="text-3xl font-bold mb-1">{status.stats.critical}</span>
-                              <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">CRITICAL</span>
-                           </div>
-                           <div className={`p-4 rounded-xl border ${SEVERITY_STYLES.HIGH.badge} flex flex-col items-center justify-center bg-opacity-5`}>
-                              <span className="text-3xl font-bold mb-1">{status.stats.high}</span>
-                              <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">HIGH</span>
-                           </div>
-                           <div className={`p-4 rounded-xl border ${SEVERITY_STYLES.MEDIUM.badge} flex flex-col items-center justify-center bg-opacity-5`}>
-                              <span className="text-3xl font-bold mb-1">{status.stats.medium}</span>
-                              <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">MEDIUM</span>
-                           </div>
-                           <div className={`p-4 rounded-xl border bg-slate-500/10 text-slate-500 border-slate-500/20 flex flex-col items-center justify-center bg-opacity-5`}>
-                              <span className="text-3xl font-bold mb-1">{status.stats.critical + status.stats.high + status.stats.medium + status.stats.low}</span>
-                              <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">TOTAL</span>
-                           </div>
+                        <div className="grid grid-cols-2 gap-3">
+                           {[
+                              { label: 'CRITICAL', val: status.stats.critical, cls: SEVERITY_STYLES.CRITICAL.badge },
+                              { label: 'HIGH', val: status.stats.high, cls: SEVERITY_STYLES.HIGH.badge },
+                              { label: 'MEDIUM', val: status.stats.medium, cls: SEVERITY_STYLES.MEDIUM.badge },
+                              { label: 'TOTAL', val: status.stats.critical + status.stats.high + status.stats.medium + status.stats.low, cls: 'bg-slate-500/10 text-slate-400 border-slate-500/20' },
+                           ].map(({ label, val, cls }) => (
+                              <div key={label} className={`p-3 rounded-xl border ${cls} flex flex-col items-center justify-center`}>
+                                 <span className="text-2xl font-bold">{val}</span>
+                                 <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">{label}</span>
+                              </div>
+                           ))}
                         </div>
                         <button onClick={stopScan} className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/50 px-4 py-2.5 rounded-xl font-medium transition-all flex items-center justify-center gap-2">
                            <XCircle className="w-4 h-4" /> Arrêter le Scan

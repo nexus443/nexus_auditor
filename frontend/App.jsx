@@ -124,6 +124,8 @@ export default function App() {
    const [selectedVuln, setSelectedVuln] = useState(null);
    const [expandedCards, setExpandedCards] = useState(new Set());
    const [history, setHistory] = useState([]);
+   const [showHistory, setShowHistory] = useState(false);
+   const [historySearch, setHistorySearch] = useState('');
    const [autoFixLoading, setAutoFixLoading] = useState(null);
    const logEndRef = useRef(null);
 
@@ -611,6 +613,19 @@ export default function App() {
                         }`} />
                      <span>API {serviceHealth.api === 'online' ? 'Online' : serviceHealth.api === 'offline' ? 'Offline' : 'Unknown'}</span>
                   </div>
+
+                  {/* History button */}
+                  <button
+                     onClick={() => { setShowHistory(true); loadHistory(); }}
+                     className={`flex items-center gap-1.5 p-2 rounded-lg transition-all text-xs font-medium ${theme === 'dark'
+                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-400'
+                        : 'bg-slate-200 hover:bg-slate-300 text-slate-600'
+                        }`}
+                     title="Historique des scans"
+                  >
+                     <History className="w-4 h-4" />
+                     {history.length > 0 && <span>{history.length}</span>}
+                  </button>
 
                   <button
                      onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
@@ -1522,6 +1537,119 @@ export default function App() {
                         </div>
                      )
                   )}
+               </div>
+            )}
+
+            {/* === HISTORY MODAL === */}
+            {showHistory && (
+               <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+                  <div className={`w-full max-w-3xl max-h-[85vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                     {/* Header */}
+                     <div className={`flex items-center justify-between px-6 py-4 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+                        <div className="flex items-center gap-3">
+                           <History className="w-5 h-5 text-indigo-400" />
+                           <div>
+                              <h3 className="font-bold text-sm">Historique des scans</h3>
+                              <p className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`}>{history.length} entrée{history.length !== 1 ? 's' : ''}</p>
+                           </div>
+                        </div>
+                        <button onClick={() => setShowHistory(false)} className={`p-2 rounded-lg transition-colors ${theme === 'dark' ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
+                           <XCircle size={18} />
+                        </button>
+                     </div>
+
+                     {/* Search */}
+                     <div className={`px-4 py-3 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+                        <div className="relative">
+                           <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                           <input
+                              type="text"
+                              value={historySearch}
+                              onChange={e => setHistorySearch(e.target.value)}
+                              placeholder="Rechercher par cible, profil ou mode…"
+                              className={`w-full pl-9 pr-3 py-2 text-sm rounded-lg border ${theme === 'dark'
+                                 ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500'
+                                 : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400'
+                                 } focus:outline-none`}
+                           />
+                        </div>
+                     </div>
+
+                     {/* List */}
+                     <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+                        {history.length === 0 && (
+                           <p className={`text-center py-10 text-sm ${theme === 'dark' ? 'text-slate-500' : 'text-slate-400'}`}>Aucun scan dans l'historique.</p>
+                        )}
+                        {history.filter(h => {
+                           if (!historySearch) return true;
+                           const q = historySearch.toLowerCase();
+                           return (h.target || '').toLowerCase().includes(q)
+                              || (h.profile || '').toLowerCase().includes(q)
+                              || (h.mode || '').toLowerCase().includes(q);
+                        }).map((h, i) => {
+                           const totalVulns = h.stats ? (h.stats.critical + h.stats.high + h.stats.medium + h.stats.low) : '?';
+                           const durationMin = h.duration_seconds ? `${Math.round(h.duration_seconds / 60)}m ${h.duration_seconds % 60}s` : '—';
+                           const tags = [
+                              h.profile && { label: (h.profile.charAt(0).toUpperCase() + h.profile.slice(1)), cls: theme === 'dark' ? 'bg-violet-900/40 text-violet-400' : 'bg-violet-100 text-violet-600' },
+                              h.mode && { label: h.mode, cls: theme === 'dark' ? 'bg-indigo-900/40 text-indigo-400' : 'bg-indigo-100 text-indigo-600' },
+                              h.llm_budget?.concurrency && { label: `×${h.llm_budget.concurrency}`, cls: theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600' },
+                           ].filter(Boolean);
+
+                           return (
+                              <div key={i} className={`rounded-xl border p-4 transition-all ${theme === 'dark' ? 'bg-slate-800/50 border-slate-700 hover:border-slate-600' : 'bg-slate-50 border-slate-200 hover:border-slate-300'}`}>
+                                 <div className="flex items-start gap-3">
+                                    <div className="flex-1 min-w-0">
+                                       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                                          {tags.map((t, ti) => (
+                                             <span key={ti} className={`text-[10px] px-2 py-0.5 rounded font-semibold uppercase ${t.cls}`}>{t.label}</span>
+                                          ))}
+                                          {h.confidence_score > 0 && (
+                                             <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${theme === 'dark' ? 'bg-emerald-900/40 text-emerald-400' : 'bg-emerald-100 text-emerald-600'}`}>
+                                                {Math.round(h.confidence_score)}% conf
+                                             </span>
+                                          )}
+                                       </div>
+                                       <p className={`text-sm font-mono truncate ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`} title={h.target}>{h.target}</p>
+                                       <div className={`flex items-center gap-3 mt-1.5 text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`}>
+                                          {h.stats && (
+                                             <span className="flex items-center gap-1">
+                                                {h.stats.critical > 0 && <span className="text-red-400 font-bold">{h.stats.critical}C</span>}
+                                                {h.stats.high > 0 && <span className="text-orange-400">{h.stats.high}H</span>}
+                                                {h.stats.medium > 0 && <span className="text-yellow-400">{h.stats.medium}M</span>}
+                                                {h.stats.low > 0 && <span className="text-blue-400">{h.stats.low}L</span>}
+                                                {totalVulns === 0 && <span className="text-emerald-400">✓ Clean</span>}
+                                             </span>
+                                          )}
+                                          <span>⏱ {durationMin}</span>
+                                          {h.successful_analyses !== undefined && (
+                                             <span>{h.successful_analyses} analyses</span>
+                                          )}
+                                       </div>
+                                    </div>
+                                    {/* Rerun button: prefill config from history entry */}
+                                    <button
+                                       onClick={() => {
+                                          if (h.target) setTarget(h.target);
+                                          if (h.profile) setProfile(h.profile);
+                                          if (h.mode) setScanMode(h.mode);
+                                          setShowHistory(false);
+                                          setView('config');
+                                          toast.success('Configuration pré-remplie depuis l\'historique');
+                                       }}
+                                       className={`shrink-0 flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border transition-colors ${theme === 'dark'
+                                          ? 'bg-indigo-600/10 border-indigo-500/30 text-indigo-400 hover:bg-indigo-600/20'
+                                          : 'bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100'
+                                          }`}
+                                       title="Relancer avec cette configuration"
+                                    >
+                                       <RotateCcw size={11} /> Rerun
+                                    </button>
+                                 </div>
+                              </div>
+                           );
+                        })}
+                     </div>
+                  </div>
                </div>
             )}
 

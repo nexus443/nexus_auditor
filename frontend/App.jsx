@@ -107,11 +107,14 @@ export default function App() {
       confidence_score: 0
    });
 
-   // Results Explorer State 
+   // Results Explorer State
    const [selectedVulnId, setSelectedVulnId] = useState(null);
    const [resultsFilter, setResultsFilter] = useState('ALL');
    const [resultsSearch, setResultsSearch] = useState('');
    const [resultsViewMode, setResultsViewMode] = useState('technical'); // 'executive' | 'technical'
+   const [resultsGroupBy, setResultsGroupBy] = useState('flat'); // 'flat' | 'file'
+   const [autoFixError, setAutoFixError] = useState(null); // null | string
+   const [autoFixSuccess, setAutoFixSuccess] = useState(null); // null | patch_file
 
    // Legacy states (kept for compatibility)
    const [searchQuery, setSearchQuery] = useState("");
@@ -390,6 +393,8 @@ export default function App() {
 
    const generateFix = async (vulnId) => {
       setAutoFixLoading(vulnId);
+      setAutoFixError(null);
+      setAutoFixSuccess(null);
       try {
          const res = await fetch(`${API_URL}/fix/generate`, {
             method: 'POST',
@@ -399,13 +404,17 @@ export default function App() {
          const data = await res.json();
 
          if (data.success) {
+            setAutoFixSuccess(data.patch_file);
             toast.success(`Patch généré: ${data.patch_file}`, 8000);
-            window.open(`${API_URL}/fix/download/${data.patch_file}`, '_blank');
          } else {
-            toast.error(`Échec génération patch: ${data.error}`);
+            const errMsg = data.error || 'Échec génération patch';
+            setAutoFixError(errMsg);
+            toast.error(`Échec: ${errMsg}`);
          }
       } catch (e) {
-         toast.error('Erreur lors de la génération du patch');
+         const errMsg = 'Backend hors ligne ou erreur réseau';
+         setAutoFixError(errMsg);
+         toast.error(errMsg);
       } finally {
          setAutoFixLoading(null);
       }
@@ -498,9 +507,10 @@ export default function App() {
 
    // === RESULTS EXPLORER LOGIC  ===
    const selectedFinding = status.vulnerabilities.find(v => v.id === selectedVulnId);
+   const dedupedVulns = deduplicateFindings(status.vulnerabilities);
    const filteredFindings = resultsFilter === 'ALL'
-      ? status.vulnerabilities
-      : status.vulnerabilities.filter(v => v.severity.toUpperCase() === resultsFilter);
+      ? dedupedVulns
+      : dedupedVulns.filter(v => v.severity.toUpperCase() === resultsFilter);
 
    // Apply search filter
    const searchedFindings = resultsSearch
@@ -512,6 +522,24 @@ export default function App() {
       )
       : filteredFindings;
 
+   // Group by file if needed
+   const groupedByFile = React.useMemo(() => {
+      const groups = {};
+      for (const f of searchedFindings) {
+         const file = f.file || f.filepath || 'Unknown';
+         if (!groups[file]) groups[file] = [];
+         groups[file].push(f);
+      }
+      // Sort files by highest severity first
+      const SEV_ORDER = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+      return Object.entries(groups).sort((a, b) => {
+         const maxA = Math.max(...a[1].map(v => SEV_ORDER[normalizeSeverity(v.severity)] || 0));
+         const maxB = Math.max(...b[1].map(v => SEV_ORDER[normalizeSeverity(v.severity)] || 0));
+         return maxB - maxA;
+      });
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [searchedFindings]);
+
    const copyJSON = (obj) => {
       navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
       toast.success('JSON copié dans le presse-papier');
@@ -522,6 +550,31 @@ export default function App() {
       const normalized = sev?.toUpperCase();
       return ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].includes(normalized) ? normalized : 'LOW';
    };
+
+   // Deduplicate by rule+file+line (keep highest confidence)
+   const deduplicateFindings = (vulns) => {
+      const seen = new Map();
+      for (const v of vulns) {
+         const key = `${v.type || v.title}|${v.file || v.filepath}|${v.line || v.line_start || ''}`;
+         const existing = seen.get(key);
+         if (!existing || (v.confidence || 0) > (existing.confidence || 0)) {
+            seen.set(key, v);
+         }
+      }
+      return Array.from(seen.values());
+   };
+
+   // Remediation bucket: Urgent=Critical, Court=High, Moyen=Medium, Backlog=Low
+   const remediationBuckets = React.useMemo(() => {
+      const vulns = status.vulnerabilities;
+      return {
+         urgent:  vulns.filter(v => normalizeSeverity(v.severity) === 'CRITICAL'),
+         court:   vulns.filter(v => normalizeSeverity(v.severity) === 'HIGH'),
+         moyen:   vulns.filter(v => normalizeSeverity(v.severity) === 'MEDIUM'),
+         backlog: vulns.filter(v => normalizeSeverity(v.severity) === 'LOW'),
+      };
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [status.vulnerabilities]);
 
    return (
       <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark'
@@ -1204,194 +1257,267 @@ export default function App() {
                            theme={theme}
                         />
                      ) : (
-                        <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
-                           {/* LISTE GAUCHE - TECHNICAL VIEW */}
-                           <div className={`col-span-4 flex flex-col overflow-hidden rounded-xl border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                              <div className={`p-4 border-b flex gap-2 overflow-x-auto no-scrollbar ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-                                 <button
-                                    onClick={() => setResultsFilter('ALL')}
-                                    className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-                                 >
-                                    ALL
-                                 </button>
-                                 {['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(sev => (
-                                    <button
-                                       key={sev}
-                                       onClick={() => setResultsFilter(sev)}
-                                       className={`px-3 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === sev ? SEVERITY_STYLES[sev].badge : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-                                    >
-                                       {sev}
-                                    </button>
-                                 ))}
-                              </div>
-
-                              {/* Search bar */}
-                              <div className={`p-3 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-                                 <div className="relative">
-                                    <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                                    <input
-                                       type="text"
-                                       value={resultsSearch}
-                                       onChange={(e) => setResultsSearch(e.target.value)}
-                                       placeholder="Rechercher..."
-                                       className={`w-full pl-9 pr-3 py-2 text-sm rounded-lg border ${theme === 'dark'
-                                          ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500'
-                                          : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400'
-                                          } focus:outline-none focus:ring-1`}
-                                    />
-                                 </div>
-                              </div>
-
-                              <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
-                                 {searchedFindings.length === 0 && (
-                                    <div className="text-center p-8 text-slate-500 text-sm">Aucun résultat pour ce filtre.</div>
+                        <div className="space-y-4 flex-1 flex flex-col min-h-0">
+                           {/* Remediation Plan strip */}
+                           <div className={`rounded-xl border p-3 shrink-0 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                              <div className="flex items-center gap-2 mb-2">
+                                 <Wrench className="w-3.5 h-3.5 text-indigo-400" />
+                                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Plan de remédiation</span>
+                                 {dedupedVulns.length < status.vulnerabilities.length && (
+                                    <span className={`ml-auto text-[10px] px-2 py-0.5 rounded ${theme === 'dark' ? 'bg-slate-800 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>
+                                       {status.vulnerabilities.length - dedupedVulns.length} doublons masqués
+                                    </span>
                                  )}
-                                 {searchedFindings.map(f => {
-                                    const severity = normalizeSeverity(f.severity);
-                                    const SevIcon = SEVERITY_STYLES[severity].icon;
-                                    return (
-                                       <div
-                                          key={f.id}
-                                          onClick={() => setSelectedVulnId(f.id)}
-                                          className={`p-4 rounded-lg cursor-pointer border transition-all hover:bg-slate-50 dark:hover:bg-slate-800/50 ${selectedVulnId === f.id
-                                             ? 'bg-indigo-50 dark:bg-slate-800 border-indigo-500 dark:border-indigo-500'
-                                             : 'bg-transparent border-transparent'
-                                             }`}
-                                       >
-                                          <div className="flex justify-between items-start mb-2">
-                                             <div className={`text-[10px] font-bold px-2 py-0.5 rounded border ${SEVERITY_STYLES[severity].badge} flex items-center gap-1`}>
-                                                <SevIcon size={10} />
-                                                {f.severity}
-                                             </div>
-                                             <span className="text-slate-400 text-xs font-mono">#{f.id}</span>
-                                          </div>
-                                          <h4 className={`font-semibold text-sm line-clamp-1 ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>{f.title}</h4>
-                                          <div className="text-xs text-slate-500 mt-1 truncate">{f.file || f.filepath}</div>
-                                       </div>
-                                    );
-                                 })}
+                              </div>
+                              <div className="grid grid-cols-4 gap-2">
+                                 {[
+                                    { key: 'urgent',  label: 'Urgent',  sub: 'Patch immédiat', cls: 'border-red-500/30 bg-red-500/5 text-red-400',    count: remediationBuckets.urgent.length },
+                                    { key: 'court',   label: 'Court',   sub: 'Sprint suivant',  cls: 'border-orange-500/30 bg-orange-500/5 text-orange-400', count: remediationBuckets.court.length },
+                                    { key: 'moyen',   label: 'Moyen',   sub: 'Backlog priorité', cls: 'border-yellow-500/30 bg-yellow-500/5 text-yellow-400', count: remediationBuckets.moyen.length },
+                                    { key: 'backlog', label: 'Backlog', sub: 'Nice to fix',      cls: 'border-blue-500/30 bg-blue-500/5 text-blue-400',   count: remediationBuckets.backlog.length },
+                                 ].map(({ label, sub, cls, count }) => (
+                                    <div key={label} className={`rounded-lg border px-3 py-2 ${cls}`}>
+                                       <div className="text-base font-bold">{count}</div>
+                                       <div className="text-[11px] font-semibold">{label}</div>
+                                       <div className="text-[10px] opacity-70">{sub}</div>
+                                    </div>
+                                 ))}
                               </div>
                            </div>
 
-                           {/* DETAIL DROITE */}
-                           <div className={`col-span-8 flex flex-col overflow-hidden rounded-xl ${theme === 'dark' ? 'bg-[#0B1120]' : 'bg-slate-50'}`}>
-                              {selectedFinding ? (
-                                 <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                                    <div className="flex items-start gap-4 mb-6">
-                                       {React.createElement(SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].icon, {
-                                          size: 32,
-                                          className: `p-3 rounded-xl border ${SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].badge} bg-opacity-10`
+                           {/* List + Detail */}
+                           <div className="flex-1 grid grid-cols-12 gap-4 min-h-0">
+                              {/* LIST */}
+                              <div className={`col-span-4 flex flex-col overflow-hidden rounded-xl border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                                 {/* Filters row */}
+                                 <div className={`px-3 pt-3 pb-2 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+                                    <div className="flex gap-1.5 flex-wrap mb-2">
+                                       <button
+                                          onClick={() => setResultsFilter('ALL')}
+                                          className={`px-2.5 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === 'ALL' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:bg-slate-800'}`}
+                                       >
+                                          ALL ({dedupedVulns.length})
+                                       </button>
+                                       {['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(sev => {
+                                          const cnt = dedupedVulns.filter(v => normalizeSeverity(v.severity) === sev).length;
+                                          return (
+                                             <button
+                                                key={sev}
+                                                onClick={() => setResultsFilter(sev)}
+                                                className={`px-2.5 py-1 rounded text-xs font-bold transition-colors ${resultsFilter === sev ? SEVERITY_STYLES[sev].badge : 'text-slate-500 hover:bg-slate-800'}`}
+                                             >
+                                                {sev.slice(0, 4)} {cnt > 0 && `(${cnt})`}
+                                             </button>
+                                          );
                                        })}
-                                       <div className="flex-1">
-                                          <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>{selectedFinding.title}</h2>
-                                          <div className={`flex items-center gap-4 mt-2 text-sm font-mono ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
-                                             <span className="flex items-center gap-1"><FileText size={14} /> {selectedFinding.file || selectedFinding.filepath}</span>
-                                             {(selectedFinding.line || selectedFinding.line_start) && (
-                                                <>
-                                                   <span>:</span>
-                                                   <span className="flex items-center gap-1">
-                                                      Ligne{selectedFinding.line_end ? 's' : ''} {selectedFinding.line || selectedFinding.line_start}
-                                                      {selectedFinding.line_end && `–${selectedFinding.line_end}`}
-                                                   </span>
-                                                </>
-                                             )}
-                                             {selectedFinding.confidence && (
-                                                <>
-                                                   <span>•</span>
+                                    </div>
+                                    {/* Search + group toggle */}
+                                    <div className="flex items-center gap-2">
+                                       <div className="relative flex-1">
+                                          <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-400" />
+                                          <input
+                                             type="text"
+                                             value={resultsSearch}
+                                             onChange={(e) => setResultsSearch(e.target.value)}
+                                             placeholder="Rechercher…"
+                                             className={`w-full pl-7 pr-2 py-1.5 text-xs rounded-lg border ${theme === 'dark'
+                                                ? 'bg-slate-950 border-slate-700 text-slate-200 focus:border-indigo-500'
+                                                : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-indigo-400'
+                                                } focus:outline-none`}
+                                          />
+                                       </div>
+                                       <button
+                                          onClick={() => setResultsGroupBy(g => g === 'flat' ? 'file' : 'flat')}
+                                          className={`shrink-0 text-[10px] px-2 py-1.5 rounded border transition-colors ${resultsGroupBy === 'file'
+                                             ? theme === 'dark' ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-400' : 'bg-indigo-100 border-indigo-300 text-indigo-600'
+                                             : theme === 'dark' ? 'bg-slate-800 border-slate-700 text-slate-400' : 'bg-white border-slate-300 text-slate-600'
+                                          }`}
+                                          title="Grouper par fichier"
+                                       >
+                                          {resultsGroupBy === 'file' ? '📁 Fichier' : '≡ Plat'}
+                                       </button>
+                                    </div>
+                                 </div>
+
+                                 <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                                    {searchedFindings.length === 0 && (
+                                       <div className="text-center p-8 text-slate-500 text-sm">Aucun résultat.</div>
+                                    )}
+                                    {resultsGroupBy === 'flat'
+                                       ? searchedFindings.map(f => (
+                                          <FindingListItem
+                                             key={f.id}
+                                             finding={f}
+                                             selected={selectedVulnId === f.id}
+                                             onSelect={() => { setSelectedVulnId(f.id); setAutoFixError(null); setAutoFixSuccess(null); }}
+                                             theme={theme}
+                                          />
+                                       ))
+                                       : groupedByFile.map(([file, findings]) => (
+                                          <div key={file} className="mb-2">
+                                             <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold sticky top-0 z-10 ${theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
+                                                <FileText size={11} />
+                                                <span className="truncate flex-1" title={file}>{file.split('/').pop()}</span>
+                                                <span className={`shrink-0 px-1.5 rounded text-[10px] ${theme === 'dark' ? 'bg-slate-700 text-slate-500' : 'bg-slate-200 text-slate-500'}`}>{findings.length}</span>
+                                             </div>
+                                             {findings.map(f => (
+                                                <FindingListItem
+                                                   key={f.id}
+                                                   finding={f}
+                                                   selected={selectedVulnId === f.id}
+                                                   onSelect={() => { setSelectedVulnId(f.id); setAutoFixError(null); setAutoFixSuccess(null); }}
+                                                   theme={theme}
+                                                />
+                                             ))}
+                                          </div>
+                                       ))
+                                    }
+                                 </div>
+                              </div>
+
+                              {/* DETAIL */}
+                              <div className={`col-span-8 flex flex-col overflow-hidden rounded-xl ${theme === 'dark' ? 'bg-[#0B1120]' : 'bg-slate-50'}`}>
+                                 {selectedFinding ? (
+                                    <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                                       <div className="flex items-start gap-4 mb-5">
+                                          {React.createElement(SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].icon, {
+                                             size: 28,
+                                             className: `p-2.5 rounded-xl border ${SEVERITY_STYLES[normalizeSeverity(selectedFinding.severity)].badge} bg-opacity-10`
+                                          })}
+                                          <div className="flex-1">
+                                             <h2 className={`text-lg font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>{selectedFinding.title}</h2>
+                                             <div className={`flex flex-wrap items-center gap-3 mt-1.5 text-xs font-mono ${theme === 'dark' ? 'text-slate-500' : 'text-slate-600'}`}>
+                                                <span className="flex items-center gap-1 truncate max-w-xs"><FileText size={12} /> {selectedFinding.file || selectedFinding.filepath}</span>
+                                                {(selectedFinding.line || selectedFinding.line_start) && (
+                                                   <span>L{selectedFinding.line || selectedFinding.line_start}{selectedFinding.line_end ? `–${selectedFinding.line_end}` : ''}</span>
+                                                )}
+                                                {selectedFinding.confidence && (
                                                    <span className={selectedFinding.confidence >= 70 ? 'text-emerald-400' : selectedFinding.confidence >= 40 ? 'text-yellow-400' : 'text-red-400'}>
                                                       {selectedFinding.confidence}% confiance
                                                    </span>
-                                                </>
-                                             )}
-                                          </div>
-                                       </div>
-                                       <button
-                                          onClick={() => copyJSON(selectedFinding)}
-                                          className={`p-2 rounded-lg border transition-colors ${theme === 'dark'
-                                             ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400'
-                                             : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-600'
-                                             }`}
-                                          title="Copier JSON"
-                                       >
-                                          <Copy size={16} />
-                                       </button>
-                                    </div>
-
-                                    <div className="space-y-8">
-                                       {/* V3.1: Manual Review Note / Evidence Missing */}
-                                       {(selectedFinding.note || selectedFinding.needs_manual_review) && (
-                                          <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 flex items-start gap-3">
-                                             <AlertTriangle className="text-yellow-500 shrink-0 mt-0.5" size={18} />
-                                             <div>
-                                                <h3 className="text-yellow-500 font-bold text-sm mb-1">Attention requise</h3>
-                                                <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-                                                   {selectedFinding.note || "Examen manuel requis (Preuve manquante)"}
-                                                </p>
+                                                )}
                                              </div>
                                           </div>
-                                       )}
-                                       {/* Description */}
-                                       <div>
-                                          <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Analyse Technique</h3>
-                                          <p className={`text-sm leading-relaxed p-4 rounded-lg border ${theme === 'dark'
-                                             ? 'bg-slate-900 border-slate-800 text-slate-300'
-                                             : 'bg-white border-slate-200 text-slate-700'
-                                             }`}>
-                                             {selectedFinding.description}
-                                             {(selectedFinding.impact && selectedFinding.impact !== "Non évalué") && (
-                                                <span className="block mt-3 pt-3 border-t border-slate-700 text-xs">
-                                                   <strong>Impact:</strong> {selectedFinding.impact}
-                                                </span>
-                                             )}
-                                          </p>
+                                          <button
+                                             onClick={() => copyJSON(selectedFinding)}
+                                             className={`p-2 rounded-lg border transition-colors ${theme === 'dark'
+                                                ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400'
+                                                : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-600'
+                                                }`}
+                                             title="Copier JSON"
+                                          >
+                                             <Copy size={14} />
+                                          </button>
                                        </div>
 
-                                       {/* Code Snippet */}
-                                       {selectedFinding.snippet && selectedFinding.snippet !== "Code non disponible" && (
-                                          <div>
-                                             <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Evidence (Code Source)</h3>
-                                             <div className="bg-[#1e1e1e] rounded-lg border border-slate-800 overflow-hidden font-mono text-sm shadow-inner">
-                                                <div className="flex items-center justify-between px-4 py-2 bg-[#252526] border-b border-slate-800 text-xs text-slate-400">
-                                                   <span>{selectedFinding.file || selectedFinding.filepath}</span>
-                                                   <span>RO mode</span>
+                                       <div className="space-y-6">
+                                          {(selectedFinding.note || selectedFinding.needs_manual_review) && (
+                                             <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 flex items-start gap-3">
+                                                <AlertTriangle className="text-yellow-500 shrink-0 mt-0.5" size={16} />
+                                                <div>
+                                                   <h3 className="text-yellow-500 font-bold text-sm mb-1">Attention requise</h3>
+                                                   <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
+                                                      {selectedFinding.note || "Examen manuel requis (preuve manquante)"}
+                                                   </p>
                                                 </div>
-                                                <pre className="p-4 overflow-x-auto text-slate-300">
-                                                   <code>{selectedFinding.snippet}</code>
-                                                </pre>
                                              </div>
-                                          </div>
-                                       )}
+                                          )}
 
-                                       {/* Remediation */}
-                                       {selectedFinding.fix && (
-                                          <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-6">
-                                             <h3 className="text-emerald-500 font-bold flex items-center gap-2 mb-2">
-                                                <Wrench size={18} /> Recommandation
-                                             </h3>
-                                             <p className={`text-sm mb-4 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-                                                {selectedFinding.fix}
+                                          <div>
+                                             <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Analyse technique</h3>
+                                             <p className={`text-sm leading-relaxed p-4 rounded-lg border ${theme === 'dark'
+                                                ? 'bg-slate-900 border-slate-800 text-slate-300'
+                                                : 'bg-white border-slate-200 text-slate-700'
+                                                }`}>
+                                                {selectedFinding.description}
+                                                {(selectedFinding.impact && selectedFinding.impact !== "Non évalué") && (
+                                                   <span className="block mt-3 pt-3 border-t border-slate-700 text-xs">
+                                                      <strong>Impact:</strong> {selectedFinding.impact}
+                                                   </span>
+                                                )}
                                              </p>
-                                             <div className="flex gap-3">
-                                                <button
-                                                   onClick={() => generateFix(selectedFinding.id)}
-                                                   disabled={autoFixLoading === selectedFinding.id || !((selectedFinding.file || selectedFinding.filepath) && (selectedFinding.line || selectedFinding.line_start) && selectedFinding.fix && selectedFinding.fix !== "Pas de correctif proposé.")}
-                                                   className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-1.5 px-4 h-8 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                                >
-                                                   {autoFixLoading === selectedFinding.id ? '⏳ Génération...' : '🔧 Générer correctif'}
-                                                </button>
-                                             </div>
                                           </div>
-                                       )}
+
+                                          {selectedFinding.snippet && selectedFinding.snippet !== "Code non disponible" && (
+                                             <div>
+                                                <h3 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Evidence</h3>
+                                                <div className="bg-[#1e1e1e] rounded-lg border border-slate-800 overflow-hidden font-mono text-sm shadow-inner">
+                                                   <div className="flex items-center justify-between px-4 py-2 bg-[#252526] border-b border-slate-800 text-xs text-slate-400">
+                                                      <span className="truncate">{selectedFinding.file || selectedFinding.filepath}</span>
+                                                      <span>RO</span>
+                                                   </div>
+                                                   <pre className="p-4 overflow-x-auto text-slate-300 text-xs">
+                                                      <code>{selectedFinding.snippet}</code>
+                                                   </pre>
+                                                </div>
+                                             </div>
+                                          )}
+
+                                          {selectedFinding.fix && (
+                                             <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-5">
+                                                <h3 className="text-emerald-500 font-bold flex items-center gap-2 mb-2 text-sm">
+                                                   <Wrench size={15} /> Recommandation
+                                                </h3>
+                                                <p className={`text-sm mb-3 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
+                                                   {selectedFinding.fix}
+                                                </p>
+                                                {/* Fix workflow */}
+                                                {autoFixSuccess ? (
+                                                   <div className="flex items-center gap-3">
+                                                      <span className="flex items-center gap-1.5 text-emerald-400 text-sm font-medium">
+                                                         <CheckCircle size={14} /> Patch généré: <span className="font-mono text-xs">{autoFixSuccess}</span>
+                                                      </span>
+                                                      <button
+                                                         onClick={() => window.open(`${API_URL}/fix/download/${autoFixSuccess}`, '_blank')}
+                                                         className="flex items-center gap-1 text-xs text-emerald-400 border border-emerald-500/30 px-2.5 py-1.5 rounded hover:bg-emerald-500/10"
+                                                      >
+                                                         <Download size={11} /> Télécharger
+                                                      </button>
+                                                      <button
+                                                         onClick={() => setAutoFixSuccess(null)}
+                                                         className="text-xs text-slate-500 hover:text-slate-300"
+                                                      >
+                                                         ✕
+                                                      </button>
+                                                   </div>
+                                                ) : autoFixError ? (
+                                                   <div className="flex items-center gap-3">
+                                                      <span className="flex items-center gap-1.5 text-red-400 text-xs">
+                                                         <XCircle size={13} /> {autoFixError}
+                                                      </span>
+                                                      <button
+                                                         onClick={() => generateFix(selectedFinding.id)}
+                                                         className="text-xs text-red-400 border border-red-500/30 px-2.5 py-1.5 rounded hover:bg-red-500/10"
+                                                      >
+                                                         Réessayer
+                                                      </button>
+                                                   </div>
+                                                ) : (
+                                                   <button
+                                                      onClick={() => generateFix(selectedFinding.id)}
+                                                      disabled={autoFixLoading === selectedFinding.id || !((selectedFinding.file || selectedFinding.filepath) && (selectedFinding.line || selectedFinding.line_start) && selectedFinding.fix && selectedFinding.fix !== "Pas de correctif proposé.")}
+                                                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-1.5 px-4 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                                   >
+                                                      {autoFixLoading === selectedFinding.id ? (
+                                                         <><Activity size={12} className="animate-spin" /> Génération…</>
+                                                      ) : (
+                                                         <><Wrench size={12} /> Générer correctif</>
+                                                      )}
+                                                   </button>
+                                                )}
+                                             </div>
+                                          )}
+                                       </div>
                                     </div>
-                                 </div>
-                              ) : (
-                                 <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                                    <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'}`}>
-                                       <Search size={24} />
+                                 ) : (
+                                    <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                                       <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                                          <Search size={24} />
+                                       </div>
+                                       <p>Sélectionnez une vulnérabilité pour voir les détails.</p>
                                     </div>
-                                    <p>Sélectionnez une vulnérabilité pour voir les détails.</p>
-                                 </div>
-                              )}
+                                 )}
+                              </div>
                            </div>
                         </div>
                      )
@@ -1733,6 +1859,35 @@ function PreflightView({ data, target, profile, scanMode, theme, onBack, onStart
                </button>
             </div>
          </div>
+      </div>
+   );
+}
+
+// === FINDING LIST ITEM ===
+
+function FindingListItem({ finding: f, selected, onSelect, theme }) {
+   const severity = (() => {
+      const n = f.severity?.toUpperCase();
+      return ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].includes(n) ? n : 'LOW';
+   })();
+   const SevIcon = SEVERITY_STYLES[severity].icon;
+   return (
+      <div
+         onClick={onSelect}
+         className={`p-3 rounded-lg cursor-pointer border transition-all hover:bg-slate-50 dark:hover:bg-slate-800/50 ${selected
+            ? 'bg-indigo-50 dark:bg-slate-800 border-indigo-500 dark:border-indigo-500'
+            : 'bg-transparent border-transparent'
+         }`}
+      >
+         <div className="flex justify-between items-center mb-1">
+            <div className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${SEVERITY_STYLES[severity].badge} flex items-center gap-1`}>
+               <SevIcon size={9} />
+               {f.severity}
+            </div>
+            <span className="text-slate-500 text-[10px] font-mono">#{f.id}</span>
+         </div>
+         <h4 className={`font-semibold text-xs line-clamp-2 ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>{f.title}</h4>
+         <div className="text-[10px] text-slate-500 mt-0.5 truncate">{(f.file || f.filepath || '').split('/').pop()}</div>
       </div>
    );
 }

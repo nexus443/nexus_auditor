@@ -128,6 +128,9 @@ export default function App() {
    const [historySearch, setHistorySearch] = useState('');
    const [autoFixLoading, setAutoFixLoading] = useState(null);
    const logEndRef = useRef(null);
+   const logContainerRef = useRef(null);
+   const logFollowRef = useRef(true);          // mutable flag — no re-render on change
+   const [showScrollBack, setShowScrollBack] = useState(false);
 
    // Ollama Connection States (V2.5)
    const [ollamaMode, setOllamaMode] = useState(() => localStorage.getItem('ollamaMode') || 'auto');
@@ -295,7 +298,30 @@ export default function App() {
       }
    };
 
-   const scrollToBottom = () => logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+   // Scroll only the log container, never the page
+   const scrollToBottom = () => {
+      if (logFollowRef.current && logContainerRef.current) {
+         logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      }
+   };
+
+   // Called by the log container's onScroll — sets follow mode
+   const handleLogScroll = () => {
+      const el = logContainerRef.current;
+      if (!el) return;
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      logFollowRef.current = atBottom;
+      setShowScrollBack(!atBottom);
+   };
+
+   // "Back to bottom" button handler
+   const jumpToBottom = () => {
+      logFollowRef.current = true;
+      setShowScrollBack(false);
+      if (logContainerRef.current) {
+         logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      }
+   };
 
    const goToPreflight = async () => {
       // Clear previous errors
@@ -964,7 +990,47 @@ export default function App() {
 
             {/* === RUNNING VIEW === */}
             {view === 'running' && (
-               <div className="space-y-4">
+               <div className="space-y-3">
+
+                  {/* ── STICKY ACTION BAR ── always visible, never scrolled away */}
+                  <div className={`sticky top-16 z-20 rounded-xl border px-4 py-3 flex items-center gap-4 shadow-lg ${theme === 'dark' ? 'bg-slate-900/95 border-slate-800 backdrop-blur-md' : 'bg-white/95 border-slate-200 backdrop-blur-md'}`}>
+                     {/* Progress + file */}
+                     <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3 mb-1.5">
+                           <Activity className="w-4 h-4 text-indigo-500 animate-pulse shrink-0" />
+                           <span className="text-sm font-semibold">Scan en cours…</span>
+                           <span className="text-xl font-bold font-mono text-indigo-500 ml-auto shrink-0">{Math.round(status.progress)}%</span>
+                        </div>
+                        <div className={`h-1.5 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                           <div
+                              className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300 ease-out"
+                              style={{ width: `${status.progress}%` }}
+                           />
+                        </div>
+                        <p className={`font-mono text-xs mt-1 truncate ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`}>{status.current_file || `Estimé: ${status.estimated_time}`}</p>
+                     </div>
+                     {/* Severity live counters */}
+                     <div className="flex items-center gap-2 shrink-0">
+                        {[
+                           { l: 'C', v: status.stats.critical,                                                           cls: 'text-red-400 border-red-500/30 bg-red-500/10' },
+                           { l: 'H', v: status.stats.high,                                                               cls: 'text-orange-400 border-orange-500/30 bg-orange-500/10' },
+                           { l: 'M', v: status.stats.medium,                                                             cls: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10' },
+                           { l: 'T', v: status.stats.critical + status.stats.high + status.stats.medium + status.stats.low, cls: 'text-slate-400 border-slate-500/30 bg-slate-500/10' },
+                        ].map(({ l, v, cls }) => (
+                           <div key={l} className={`flex flex-col items-center px-2 py-1 rounded border text-xs font-bold ${cls}`}>
+                              <span className="text-base leading-none">{v}</span>
+                              <span className="text-[9px] opacity-70">{l}</span>
+                           </div>
+                        ))}
+                     </div>
+                     {/* Stop button — always reachable */}
+                     <button
+                        onClick={stopScan}
+                        className="shrink-0 flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/40 px-4 py-2 rounded-lg font-medium transition-all text-sm"
+                     >
+                        <XCircle className="w-4 h-4" /> Arrêter
+                     </button>
+                  </div>
 
                   {/* Reconnecting banner */}
                   {pollingState === 'reconnecting' && (
@@ -998,38 +1064,11 @@ export default function App() {
                            >
                               <Copy className="w-3 h-3" /> Logs
                            </button>
-                           <button
-                              onClick={stopScan}
-                              className="flex items-center gap-1 text-xs border border-red-500/40 text-red-400 px-2 py-1 rounded hover:bg-red-500/10"
-                           >
-                              <XCircle className="w-3 h-3" /> Stop
-                           </button>
                         </div>
                      </div>
                   )}
 
-                  {/* Progress Card */}
-                  <div className={`rounded-2xl border p-5 shadow-xl ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                     <div className="flex justify-between items-end mb-3">
-                        <div>
-                           <h2 className="text-lg font-bold flex items-center gap-2">
-                              <Activity className="text-indigo-500 animate-pulse" />
-                              Scan en cours…
-                           </h2>
-                           <p className={`font-mono text-sm mt-1 truncate max-w-lg ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>{status.current_file}</p>
-                        </div>
-                        <div className="text-right">
-                           <div className="text-2xl font-bold font-mono text-indigo-500">{Math.round(status.progress)}%</div>
-                           <div className="text-xs text-slate-400">Estimé: <span className="text-slate-300">{status.estimated_time}</span></div>
-                        </div>
-                     </div>
-                     <div className={`h-2 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-200'}`}>
-                        <div
-                           className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300 ease-out"
-                           style={{ width: `${status.progress}%` }}
-                        />
-                     </div>
-                  </div>
+                  {/* Progress bar card removed — merged into sticky bar above */}
 
                   {/* Pipeline Stages Timeline */}
                   <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -1077,7 +1116,7 @@ export default function App() {
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
                      {/* Terminal */}
                      <div className="lg:col-span-2">
-                        <div className="bg-slate-950 rounded-xl border border-slate-800 h-[420px] flex flex-col font-mono text-xs overflow-hidden shadow-2xl">
+                        <div className="relative bg-slate-950 rounded-xl border border-slate-800 h-[420px] flex flex-col font-mono text-xs overflow-hidden shadow-2xl">
                            <div className="px-3 py-2 border-b border-slate-800 bg-slate-900/50 flex items-center gap-2 flex-wrap">
                               <div className="flex items-center gap-1.5 text-slate-400 shrink-0">
                                  <Terminal size={13} />
@@ -1135,7 +1174,12 @@ export default function App() {
                                  <Download size={12} />
                               </button>
                            </div>
-                           <div className="flex-1 p-3 overflow-y-auto space-y-0.5 custom-scrollbar">
+                           {/* Scrollable log body — scrolls the container, never the page */}
+                           <div
+                              ref={logContainerRef}
+                              onScroll={handleLogScroll}
+                              className="flex-1 p-3 overflow-y-auto space-y-0.5 custom-scrollbar relative"
+                           >
                               {status.logs.filter(log => {
                                  const cls = classifyLog(log);
                                  if (logFilter !== 'all' && cls !== logFilter) return false;
@@ -1159,11 +1203,20 @@ export default function App() {
                               })}
                               <div ref={logEndRef} />
                            </div>
+                           {/* "Back to bottom" button — shown when user scrolled up */}
+                           {showScrollBack && (
+                              <button
+                                 onClick={jumpToBottom}
+                                 className="absolute bottom-3 right-4 flex items-center gap-1.5 text-[11px] bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-full shadow-lg transition-all"
+                              >
+                                 <ChevronDown className="w-3 h-3" /> Revenir en bas
+                              </button>
+                           )}
                         </div>
                      </div>
 
-                     {/* Live Stats */}
-                     <div className="space-y-4">
+                     {/* Live Stats — detailed breakdown (Stop is in sticky bar) */}
+                     <div className="space-y-3">
                         <div className="grid grid-cols-2 gap-3">
                            {[
                               { label: 'CRITICAL', val: status.stats.critical, cls: SEVERITY_STYLES.CRITICAL.badge },
@@ -1177,7 +1230,8 @@ export default function App() {
                               </div>
                            ))}
                         </div>
-                        <button onClick={stopScan} className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/50 px-4 py-2.5 rounded-xl font-medium transition-all flex items-center justify-center gap-2">
+                        {/* Secondary Stop button for sidebar — same action, redundant for UX clarity */}
+                        <button onClick={stopScan} className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/50 px-4 py-2 rounded-xl font-medium transition-all flex items-center justify-center gap-2 text-sm">
                            <XCircle className="w-4 h-4" /> Arrêter le Scan
                         </button>
                      </div>

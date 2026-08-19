@@ -1,23 +1,252 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@import "tw-animate-css";
 
-/* Optionnel : On force le fond sombre par défaut pour éviter le flash blanc */
-body {
-  background-color: #020617; /* slate-950 */
-  color: #f1f5f9; /* slate-100 */
+/*
+ * Sources scannées par Tailwind. On restreint volontairement aux dossiers
+ * réellement utilisés pour ne pas embarquer les classes des fichiers de
+ * sauvegarde (App.jsx.backup_*, App.backup.*) restés à la racine.
+ */
+@source "./main.jsx";
+@source "./App.jsx";
+@source "./index.html";
+@source "./components";
+@source "./pages";
+@source "./hooks";
+@source "./lib";
+@source "./utils";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-critical: var(--critical);
+  --color-critical-foreground: var(--critical-foreground);
+  --color-high: var(--high);
+  --color-high-foreground: var(--high-foreground);
+  --color-medium: var(--medium);
+  --color-medium-foreground: var(--medium-foreground);
+  --color-low: var(--low);
+  --color-low-foreground: var(--low-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 25%, transparent), 0 8px 32px -8px color-mix(in oklab, var(--primary) 35%, transparent);
+  --shadow-elevated: 0 1px 0 0 color-mix(in oklab, white 4%, transparent) inset, 0 8px 24px -12px oklch(0 0 0 / 0.6);
+  --gradient-surface: linear-gradient(180deg, color-mix(in oklab, var(--surface-elevated) 100%, transparent) 0%, color-mix(in oklab, var(--surface) 100%, transparent) 100%);
+  --gradient-primary: linear-gradient(135deg, oklch(0.72 0.16 230) 0%, oklch(0.62 0.20 270) 100%);
 }
 
-/* Toast animations */
+:root {
+  --radius: 0.625rem;
+  /* Dark, near-black slate, premium */
+  --background: oklch(0.16 0.012 250);
+  --foreground: oklch(0.96 0.005 250);
+  --surface: oklch(0.19 0.014 252);
+  --surface-elevated: oklch(0.22 0.016 252);
+  --card: oklch(0.20 0.014 252);
+  --card-foreground: oklch(0.96 0.005 250);
+  --popover: oklch(0.20 0.014 252);
+  --popover-foreground: oklch(0.96 0.005 250);
+  --primary: oklch(0.72 0.16 230);
+  --primary-foreground: oklch(0.14 0.02 250);
+  --secondary: oklch(0.26 0.016 252);
+  --secondary-foreground: oklch(0.94 0.006 250);
+  --muted: oklch(0.24 0.014 252);
+  --muted-foreground: oklch(0.66 0.018 252);
+  --accent: oklch(0.28 0.02 252);
+  --accent-foreground: oklch(0.96 0.005 250);
+  --destructive: oklch(0.62 0.22 27);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.30 0.014 252 / 0.6);
+  --input: oklch(0.28 0.014 252);
+  --ring: oklch(0.72 0.16 230);
+
+  --critical: oklch(0.62 0.23 25);
+  --critical-foreground: oklch(0.98 0 0);
+  --high: oklch(0.72 0.18 50);
+  --high-foreground: oklch(0.16 0.02 250);
+  --medium: oklch(0.82 0.17 90);
+  --medium-foreground: oklch(0.16 0.02 250);
+  --low: oklch(0.70 0.14 230);
+  --low-foreground: oklch(0.16 0.02 250);
+  --info: oklch(0.68 0.012 252);
+  --info-foreground: oklch(0.16 0.02 250);
+  --success: oklch(0.72 0.16 155);
+  --success-foreground: oklch(0.16 0.02 250);
+
+  --chart-1: oklch(0.72 0.16 230);
+  --chart-2: oklch(0.62 0.22 27);
+  --chart-3: oklch(0.72 0.18 50);
+  --chart-4: oklch(0.82 0.17 90);
+  --chart-5: oklch(0.72 0.16 155);
+
+  --sidebar: oklch(0.14 0.012 250);
+  --sidebar-foreground: oklch(0.88 0.008 250);
+  --sidebar-primary: oklch(0.72 0.16 230);
+  --sidebar-primary-foreground: oklch(0.14 0.02 250);
+  --sidebar-accent: oklch(0.22 0.014 252);
+  --sidebar-accent-foreground: oklch(0.96 0.005 250);
+  --sidebar-border: oklch(0.26 0.014 252 / 0.6);
+  --sidebar-ring: oklch(0.72 0.16 230);
+
+  --app-glow-1: color-mix(in oklab, var(--primary) 12%, transparent);
+  --app-glow-2: color-mix(in oklab, oklch(0.62 0.20 280) 10%, transparent);
+  --code-surface: oklch(0.13 0.012 250);
+}
+
+.dark {
+  /* l'application est sombre par défaut : mêmes valeurs que :root */
+}
+
+/*
+ * Thème clair — conservé depuis l'ancienne interface (bascule persistée dans
+ * localStorage via `data-theme`). Seuls les tokens sont redéfinis, aucun
+ * composant n'a besoin de connaître le thème actif.
+ */
+:root[data-theme='light'] {
+  --background: oklch(0.98 0.003 250);
+  --foreground: oklch(0.24 0.015 252);
+  --surface: oklch(1 0 0);
+  --surface-elevated: oklch(1 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.24 0.015 252);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.24 0.015 252);
+  --primary: oklch(0.55 0.16 250);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.95 0.006 250);
+  --secondary-foreground: oklch(0.28 0.015 252);
+  --muted: oklch(0.95 0.006 250);
+  --muted-foreground: oklch(0.48 0.018 252);
+  --accent: oklch(0.94 0.008 250);
+  --accent-foreground: oklch(0.24 0.015 252);
+  --destructive: oklch(0.55 0.21 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.88 0.008 250 / 0.9);
+  --input: oklch(0.90 0.008 250);
+  --ring: oklch(0.55 0.16 250);
+
+  --critical: oklch(0.53 0.21 25);
+  --critical-foreground: oklch(0.99 0 0);
+  --high: oklch(0.60 0.16 50);
+  --high-foreground: oklch(0.99 0 0);
+  --medium: oklch(0.65 0.14 85);
+  --medium-foreground: oklch(0.20 0.02 250);
+  --low: oklch(0.55 0.13 235);
+  --low-foreground: oklch(0.99 0 0);
+  --info: oklch(0.50 0.012 252);
+  --info-foreground: oklch(0.99 0 0);
+  --success: oklch(0.55 0.14 155);
+  --success-foreground: oklch(0.99 0 0);
+
+  --sidebar: oklch(0.99 0.002 250);
+  --sidebar-foreground: oklch(0.30 0.015 252);
+  --sidebar-primary: oklch(0.55 0.16 250);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.94 0.008 250);
+  --sidebar-accent-foreground: oklch(0.24 0.015 252);
+  --sidebar-border: oklch(0.89 0.008 250 / 0.9);
+  --sidebar-ring: oklch(0.55 0.16 250);
+
+  --app-glow-1: color-mix(in oklab, var(--primary) 7%, transparent);
+  --app-glow-2: color-mix(in oklab, oklch(0.62 0.20 280) 6%, transparent);
+  --code-surface: oklch(0.97 0.004 250);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html, body { background-color: var(--color-background); color: var(--color-foreground); }
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(1200px 600px at 100% -10%, var(--app-glow-1), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, var(--app-glow-2), transparent 60%);
+    background-attachment: fixed;
+  }
+  ::selection { background: color-mix(in oklab, var(--primary) 35%, transparent); }
+}
+
+@layer utilities {
+  .glass {
+    background: color-mix(in oklab, var(--surface-elevated) 70%, transparent);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+  }
+  .ring-glow { box-shadow: var(--shadow-glow); }
+  .text-gradient {
+    background: linear-gradient(135deg, oklch(0.92 0.04 230), oklch(0.72 0.16 230));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  :root[data-theme='light'] .text-gradient {
+    background: linear-gradient(135deg, oklch(0.32 0.05 250), oklch(0.55 0.16 250));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--border) 60%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--border) 60%, transparent) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  /* Scrollbars discrètes — reprises de l'ancienne interface */
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+    border-radius: 3px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
+
+/* Animation d'entrée des toasts (conservée de l'ancienne interface) */
 @keyframes slide-in {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 
 .animate-slide-in {

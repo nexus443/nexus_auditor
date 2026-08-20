@@ -13,7 +13,7 @@ import { EmptyState } from '@/components/nexus/EmptyState'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useNexus } from '@/hooks/useNexus.jsx'
-import { totalFindings } from '@/utils/mappers'
+import { formatConfidence, totalFindings } from '@/utils/mappers'
 import { formatDateTime, formatDuration, shortTargetName } from '@/utils/format'
 
 export default function Dashboard() {
@@ -30,7 +30,8 @@ export default function Dashboard() {
   } = useNexus()
 
   const total = totalFindings(severityCounts)
-  const confidence = Number(status.confidence_score) || 0
+  // null = confiance jamais calculée (audit interrompu avant la corrélation).
+  const confidence = status.confidence_score ?? null
   const hasScanned = total > 0 || status.progress > 0 || history.length > 0
 
   const riskLabel =
@@ -100,7 +101,7 @@ export default function Dashboard() {
                     ) : (
                       'Aucune cible enregistrée pour le scan courant.'
                     )}{' '}
-                    Score de confiance moyen des détections : {confidence}%.
+                    Score de confiance moyen des détections : {formatConfidence(confidence)}.
                   </p>
                   <div className="mt-4">
                     <SeverityBar counts={severityCounts} />

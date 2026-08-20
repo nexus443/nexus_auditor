@@ -17,15 +17,19 @@ class ApiError extends Error {
   }
 }
 
-async function request(path, { method = 'GET', body, timeout } = {}) {
+async function request(path, { method = 'GET', body, timeout, signal } = {}) {
   const options = { method, headers: {} }
 
   if (body !== undefined) {
     options.headers['Content-Type'] = 'application/json'
     options.body = JSON.stringify(body)
   }
-  if (timeout) {
+  if (timeout && signal) {
+    options.signal = AbortSignal.any([AbortSignal.timeout(timeout), signal])
+  } else if (timeout) {
     options.signal = AbortSignal.timeout(timeout)
+  } else if (signal) {
+    options.signal = signal
   }
 
   const res = await fetch(`${API_URL}${path}`, options)
@@ -43,11 +47,24 @@ async function request(path, { method = 'GET', body, timeout } = {}) {
 }
 
 /** GET /scan/status — état complet du scan courant (ou du dernier scan). */
-export const getScanStatus = (scanId) =>
-  request(scanId ? `/scan/status?scan_id=${encodeURIComponent(scanId)}` : '/scan/status')
+export const getScanStatus = (scanId, options = {}) =>
+  request(scanId ? `/scan/status?scan_id=${encodeURIComponent(scanId)}` : '/scan/status', options)
 
-/** GET /scan/status avec timeout court : sert de sonde de santé de l'API. */
-export const pingApi = () => request('/scan/status', { timeout: 3000 })
+/**
+ * GET /health — sonde de vivacité dédiée du backend.
+ * Ne lit ni l'état de scan, ni le disque, ni Ollama : elle mesure uniquement
+ * « le service FastAPI répond-il ? », avec un timeout court.
+ */
+export const pingApi = () => request('/health', { timeout: 3000 })
+
+/** GET /scan/progress — progression légère du scan (payload court, ~1 Ko). */
+export const getScanProgress = (options = {}) => request('/scan/progress', options)
+
+/** GET /scan/logs — journal du scan courant uniquement. */
+export const getScanLogs = (options = {}) => request('/scan/logs', options)
+
+/** GET /scan/findings — vulnérabilités + compteurs du scan courant. */
+export const getScanFindings = (options = {}) => request('/scan/findings', options)
 
 /** GET /scan/stages — rapport d'étapes du pipeline. */
 export const getScanStages = (scanId) =>

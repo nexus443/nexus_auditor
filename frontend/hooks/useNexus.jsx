@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import * as api from '@/services/api'
 import { useToasts } from '@/components/Toast.jsx'
 import {
+  INTERRUPTED_STATES,
   mapApiVulnsToUi,
   mapHistoryToUi,
   mapStageReport,
@@ -21,14 +22,22 @@ import {
 
 const NexusContext = createContext(null)
 
-/** Fréquence de polling de l'état du scan (identique à l'ancienne interface). */
-const STATUS_POLL_MS = 1000
-/** Fréquence de la sonde de santé de l'API (identique à l'ancienne interface). */
-const HEALTH_POLL_MS = 30000
+/**
+ * Fréquence de polling de la progression pendant un scan actif.
+ * On interroge `/scan/progress` (payload ~1 Ko servi depuis la mémoire du
+ * backend) — les logs et findings complets ne sont récupérés que lorsque leurs
+ * compteurs changent.
+ */
+const PROGRESS_POLL_MS = 1500
+/** Fréquence de la sonde de santé (`GET /health`, réponse immédiate). */
+const HEALTH_POLL_MS = 15000
+/** Délai avant re-vérification quand une sonde de santé échoue. */
+const HEALTH_RETRY_MS = 2000
 
 const EMPTY_STATUS = {
   id: null,
   is_scanning: false,
+  lifecycle: 'idle',
   progress: 0,
   estimated_time: 'En attente',
   current_file: '',
@@ -37,7 +46,10 @@ const EMPTY_STATUS = {
   stats: { critical: 0, high: 0, medium: 0, low: 0, files: 0, skipped: 0 },
   logs: [],
   vulnerabilities: [],
-  confidence_score: 0,
+  // null = « non calculée » : la corrélation n'a pas (encore) abouti.
+  confidence_score: null,
+  report_generated: false,
+  error: null,
   target_dir: null,
   profile: null,
   mode: null,
@@ -121,21 +133,41 @@ export function NexusProvider({ children }) {
   useEffect(() => writeStored('ollamaUrl', ollamaUrl), [ollamaUrl])
 
   // --- Sonde de santé de l'API --------------------------------------------
+  // `GET /health` ne touche ni l'état de scan, ni le disque, ni Ollama : un
+  // échec signifie réellement que le service ne répond pas. Un timeout isolé
+  // ne suffit pas à déclarer le backend hors ligne : on revérifie une fois
+  // après un court délai avant de basculer l'indicateur.
   useEffect(() => {
     let cancelled = false
-    const check = async () => {
+    let retryTimer = null
+
+    const probe = async () => {
       try {
         await api.pingApi()
-        if (!cancelled) setHealth({ api: 'online', lastCheck: Date.now() })
+        return true
       } catch {
-        if (!cancelled) setHealth({ api: 'offline', lastCheck: Date.now() })
+        return false
       }
     }
+
+    const check = async () => {
+      if (await probe()) {
+        if (!cancelled) setHealth({ api: 'online', lastCheck: Date.now() })
+        return
+      }
+      if (cancelled) return
+      retryTimer = setTimeout(async () => {
+        const ok = await probe()
+        if (!cancelled) setHealth({ api: ok ? 'online' : 'offline', lastCheck: Date.now() })
+      }, HEALTH_RETRY_MS)
+    }
+
     check()
     const interval = setInterval(check, HEALTH_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(interval)
+      clearTimeout(retryTimer)
     }
   }, [])
 
@@ -217,21 +249,105 @@ export function NexusProvider({ children }) {
     Boolean(status.is_scanning) ||
     (status.progress > 0 && status.progress < 100 && !status.stage_report?.terminal_state)
 
+  // Compteurs du dernier fetch « lourd » (logs / findings) : on ne re-télécharge
+  // ces listes que lorsque `/scan/progress` indique qu'elles ont grandi.
+  const heavyCountsRef = useRef({ scanId: null, logs: -1, findings: -1 })
+  // Empreinte du dernier snapshot de progression appliqué : évite un setState
+  // (et donc un re-render global) quand rien n'a changé entre deux ticks.
+  const progressSnapshotRef = useRef('')
+
   useEffect(() => {
     if (!isPolling) return undefined
 
-    const interval = setInterval(async () => {
-      const data = await refreshStatus()
-      if (!data) return
-      // Fin de scan : rafraîchit l'historique et bascule sur les résultats si
-      // l'utilisateur regardait le scan en direct (comportement d'origine).
-      if (!data.is_scanning && data.progress === 100) {
-        refreshHistory()
-        if (locationRef.current === '/scan/live') navigate('/results')
-      }
-    }, STATUS_POLL_MS)
+    const controller = new AbortController()
+    const { signal } = controller
+    let inFlight = false
 
-    return () => clearInterval(interval)
+    const tick = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const progress = await api.getScanProgress({ signal })
+        if (signal.aborted || !progress) return
+
+        const {
+          logs_count: logsCount,
+          findings_count: findingsCount,
+          elapsed_s: _elapsed,
+          ...light
+        } = progress
+
+        const counts = heavyCountsRef.current
+        const scanChanged = counts.scanId !== progress.id
+        const needLogs = scanChanged || counts.logs !== (logsCount ?? 0)
+        const needFindings = scanChanged || counts.findings !== (findingsCount ?? 0)
+
+        let logsData = null
+        let findingsData = null
+        if (needLogs || needFindings) {
+          const [logsRes, findingsRes] = await Promise.all([
+            needLogs ? api.getScanLogs({ signal }) : Promise.resolve(null),
+            needFindings ? api.getScanFindings({ signal }) : Promise.resolve(null),
+          ])
+          if (signal.aborted) return
+          if (logsRes) logsData = logsRes.logs || []
+          if (findingsRes) findingsData = findingsRes.vulnerabilities || []
+          heavyCountsRef.current = {
+            scanId: progress.id,
+            logs: logsRes ? (logsRes.count ?? logsRes.logs?.length ?? 0) : counts.logs,
+            findings: findingsRes
+              ? (findingsRes.count ?? findingsRes.vulnerabilities?.length ?? 0)
+              : counts.findings,
+          }
+        }
+
+        const snapshot = JSON.stringify(light)
+        const lightChanged = snapshot !== progressSnapshotRef.current
+        if (lightChanged || logsData || findingsData) {
+          progressSnapshotRef.current = snapshot
+          setStatus((previous) => ({
+            ...previous,
+            ...light,
+            telemetry: { ...(previous.telemetry || {}), ...(light.telemetry || {}) },
+            logs: logsData ?? previous.logs,
+            vulnerabilities: findingsData ?? previous.vulnerabilities,
+          }))
+          setStatusError(null)
+        }
+
+        // Fin de scan : détectée uniquement via l'état terminal canonique du
+        // backend (jamais via `!is_scanning` ni la progression seule). On
+        // recharge l'état complet + l'historique ; la navigation automatique
+        // vers les résultats n'a lieu QUE pour un scan réellement complété —
+        // timeout/échec/annulation restent sur l'écran de scan, qui affiche
+        // l'état terminal et les détections partielles.
+        const terminal = progress.stage_report?.terminal_state
+        if (!progress.is_scanning && terminal) {
+          await refreshStatus()
+          refreshHistory()
+          if (
+            (progress.lifecycle === 'completed' || terminal === 'completed') &&
+            locationRef.current === '/scan/live'
+          ) {
+            navigate('/results')
+          }
+        }
+      } catch (error) {
+        if (!signal.aborted) {
+          setStatusError(error.message || 'Backend injoignable')
+        }
+      } finally {
+        inFlight = false
+      }
+    }
+
+    tick()
+    const interval = setInterval(tick, PROGRESS_POLL_MS)
+
+    return () => {
+      controller.abort()
+      clearInterval(interval)
+    }
   }, [isPolling, refreshStatus, refreshHistory, navigate])
 
   // --- Actions -------------------------------------------------------------
@@ -275,10 +391,15 @@ export function NexusProvider({ children }) {
           ...previous,
           id: result?.scan_id ?? previous.id,
           is_scanning: true,
+          lifecycle: 'running',
           progress: 1,
           vulnerabilities: [],
           logs: [],
           stats: { critical: 0, high: 0, medium: 0, low: 0, files: 0, skipped: 0 },
+          stage_report: null,
+          confidence_score: null,
+          report_generated: false,
+          error: null,
         }))
         toast.success('Scan lancé avec succès')
         navigate('/scan/live')
@@ -377,7 +498,11 @@ export function NexusProvider({ children }) {
       stageReport,
       scanState,
       isScanning: Boolean(status.is_scanning),
-      hasResults: findings.length > 0 || status.progress === 100,
+      // Résultats FINAUX : uniquement pour un audit réellement complété.
+      // Un scan arrêté (timeout, échec, annulation) n'a que des détections
+      // partielles — jamais présentées comme un audit terminé.
+      hasResults: scanState === 'completed',
+      hasPartialFindings: INTERRUPTED_STATES.includes(scanState) && findings.length > 0,
       health,
       history: historyEntries,
       historyLoading,

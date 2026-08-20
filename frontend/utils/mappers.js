@@ -44,6 +44,19 @@ export function confidenceLabel(confidence) {
   return 'Low'
 }
 
+/**
+ * Confiance globale du scan : `null` signifie « non calculée » (la corrélation
+ * n'a jamais abouti — timeout, échec ou annulation). On n'affiche jamais 0 %
+ * à la place : 0 % voudrait dire « calculée, et nulle ».
+ */
+export function hasConfidence(confidence) {
+  return confidence !== null && confidence !== undefined && Number.isFinite(Number(confidence))
+}
+
+export function formatConfidence(confidence) {
+  return hasConfidence(confidence) ? `${Math.round(Number(confidence))}%` : 'Non calculée'
+}
+
 export function confidenceTone(confidence) {
   const value = Number(confidence)
   if (!Number.isFinite(value)) return 'text-muted-foreground'
@@ -157,7 +170,8 @@ const STAGE_LABELS = {
 /**
  * Transforme `status.stage_report` (backend) en liste d'étapes + index courant
  * pour `StageTimeline`. Aucune heuristique sur la progression n'est utilisée :
- * l'état réel du pipeline est désormais disponible côté API.
+ * l'état réel du pipeline (y compris failed/cancelled/skipped sur interruption)
+ * est désormais disponible côté API.
  */
 export function mapStageReport(stageReport) {
   const sequence = stageReport?.sequence?.length
@@ -173,13 +187,26 @@ export function mapStageReport(stageReport) {
   }))
 
   const terminal = stageReport?.terminal_state || null
+  // Stage interrompu : champ dédié depuis la refonte du state machine ; pour
+  // les états persistés plus anciens, on retombe sur le stage resté "active".
+  const interruptedStage =
+    stageReport?.interrupted_stage ||
+    (terminal && terminal !== 'completed'
+      ? sequence.find((key) => ['active', 'failed', 'cancelled'].includes(stageStatus[key]))
+      : null) ||
+    null
+  // Sur interruption, `current` contient le jeton terminal (failed/timeout/…),
+  // pas un nom de stage : on retombe alors sur le stage interrompu enregistré.
   let currentIndex = sequence.indexOf(stageReport?.current)
+  if (currentIndex < 0 && interruptedStage) {
+    currentIndex = sequence.indexOf(interruptedStage)
+  }
   if (currentIndex < 0) {
     currentIndex = terminal === 'completed' ? sequence.length : 0
   }
   if (terminal === 'completed') currentIndex = sequence.length
 
-  return { stages, currentIndex, terminal }
+  return { stages, currentIndex, terminal, interruptedStage }
 }
 
 /**
@@ -209,7 +236,10 @@ export function isMutedLog(log) {
   return String(log?.msg || '').includes('🗑️ Filtered')
 }
 
-const STATUS_PILL_VALUES = ['completed', 'failed', 'running', 'stopped']
+const STATUS_PILL_VALUES = ['completed', 'failed', 'running', 'stopped', 'timeout', 'cancelled']
+
+/** États terminaux non aboutis : les détections y sont partielles. */
+export const INTERRUPTED_STATES = ['timeout', 'failed', 'cancelled']
 
 /**
  * Normalise une entrée d'historique. Le fichier `audit_history.json` contient
@@ -264,14 +294,24 @@ export function mapHistoryToUi(history) {
 }
 
 /**
- * Statut affiché pour le scan courant, dérivé de l'état backend
- * (`is_scanning`, `progress`, `stage_report.terminal_state`).
+ * État canonique du scan courant :
+ * 'idle' | 'running' | 'completed' | 'failed' | 'timeout' | 'cancelled'.
+ *
+ * Source de vérité : le champ `lifecycle` calculé par le backend. Le fallback
+ * (états persistés avant l'introduction de `lifecycle`) ne dérive JAMAIS un
+ * succès de `!is_scanning` ni de la progression : seul
+ * `terminal_state === "completed"` signifie « audit complet ».
  */
 export function scanStatusPill(status) {
+  const lifecycle = status?.lifecycle
+  if (STATUS_PILL_VALUES.includes(lifecycle) || lifecycle === 'idle') {
+    return lifecycle === 'stopped' ? 'cancelled' : lifecycle
+  }
   if (status?.is_scanning) return 'running'
   const terminal = status?.stage_report?.terminal_state
-  if (terminal === 'stopped') return 'stopped'
+  if (terminal === 'completed') return 'completed'
+  if (terminal === 'timeout') return 'timeout'
+  if (terminal === 'stopped' || terminal === 'cancelled') return 'cancelled'
   if (terminal === 'failed' || terminal === 'error') return 'failed'
-  if (terminal === 'completed' || status?.progress === 100) return 'completed'
-  return 'stopped'
+  return status?.id && (status?.progress || 0) > 0 ? 'cancelled' : 'idle'
 }

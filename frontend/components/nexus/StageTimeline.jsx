@@ -7,14 +7,21 @@ import { cn } from '@/lib/utils'
  * du pourcentage de progression, contrairement à l'ancienne interface.
  */
 export function StageTimeline({ stages, currentIndex, terminal }) {
-  const stopped = terminal === 'stopped' || terminal === 'failed' || terminal === 'error'
+  // Terminal non abouti : stopped (nom historique de l'annulation), timeout,
+  // failed. Chaque stage porte désormais son statut réel côté backend
+  // (completed / active / failed / cancelled / skipped) — plus de déduction.
+  const interrupted =
+    terminal === 'stopped' || terminal === 'cancelled' || terminal === 'failed' ||
+    terminal === 'timeout' || terminal === 'error'
 
   return (
     <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       {stages.map((s, i) => {
         const done = s.status === 'completed' || (terminal === 'completed' && s.status !== 'failed')
-        const active = !stopped && !done && (s.status === 'active' || i === currentIndex)
-        const failed = stopped && i === currentIndex
+        const failed =
+          s.status === 'failed' || s.status === 'cancelled' || (interrupted && !done && i === currentIndex)
+        const skipped = s.status === 'skipped' || (interrupted && !done && !failed)
+        const active = !interrupted && !done && !failed && (s.status === 'active' || i === currentIndex)
         return (
           <li
             key={s.key}
@@ -27,6 +34,7 @@ export function StageTimeline({ stages, currentIndex, terminal }) {
                   : done
                     ? 'border-success/40 bg-success/5'
                     : 'border-border bg-card/40',
+              skipped && 'opacity-60',
             )}
           >
             <div className="flex items-center gap-2">

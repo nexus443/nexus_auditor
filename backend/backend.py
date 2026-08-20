@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import json
@@ -60,6 +61,32 @@ PATCHES_DIR = "./audit_logs/patches"
 SCAN_STORE_LOCK = threading.Lock()
 HISTORY_LOCK = threading.Lock()
 
+# --- Instrumentation légère (aucune dépendance) ---------------------------
+SERVER_STARTED_AT = time.time()
+PERF_METRICS_LOCK = threading.Lock()
+PERF_METRICS: Dict[str, Any] = {
+    "endpoints": {},   # path -> {count, avg_ms, max_ms, last_ms}
+    "persist": {"count": 0, "skipped": 0, "total_ms": 0.0, "last_ms": 0.0, "last_bytes": 0},
+}
+# Intervalle minimal entre deux écritures disque de l'état de scan pendant un
+# scan actif (les jalons critiques forcent toujours l'écriture immédiate).
+PERSIST_MIN_INTERVAL_S = max(0.0, float(os.getenv("NEXUS_PERSIST_MIN_INTERVAL_S", "2.0")))
+
+
+def _record_endpoint_timing(path: str, duration_ms: float):
+    with PERF_METRICS_LOCK:
+        endpoints = PERF_METRICS["endpoints"]
+        entry = endpoints.get(path)
+        if entry is None:
+            if len(endpoints) >= 40:
+                return
+            entry = {"count": 0, "avg_ms": 0.0, "max_ms": 0.0, "last_ms": 0.0}
+            endpoints[path] = entry
+        entry["count"] += 1
+        entry["avg_ms"] = round(entry["avg_ms"] + (duration_ms - entry["avg_ms"]) / entry["count"], 2)
+        entry["max_ms"] = round(max(entry["max_ms"], duration_ms), 2)
+        entry["last_ms"] = round(duration_ms, 2)
+
 os.makedirs(SCAN_STATE_DIR, exist_ok=True)
 os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
 os.makedirs(PATCHES_DIR, exist_ok=True)
@@ -98,16 +125,107 @@ def init_stage_report(current_stage: str = "idle") -> dict:
     }
 
 
-def mark_stage_terminal_state(terminal_state: str):
-    report = scan_state.setdefault("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+# États terminaux canoniques du cycle de vie d'un scan.
+# "stopped" est le nom historique de l'annulation utilisateur (conservé dans
+# les fichiers d'état pour compatibilité) ; il est exposé comme "cancelled"
+# via compute_scan_lifecycle().
+TERMINAL_STATES = ("completed", "failed", "timeout", "stopped")
+
+
+def apply_terminal_to_stage_report(report: dict, terminal_state: str, interrupted_stage: Optional[str] = None) -> dict:
+    """
+    Applique un état terminal à un stage_report de façon cohérente :
+    - "completed" : tous les stages passent à completed ;
+    - sinon : le stage actif est marqué "failed" (timeout/échec) ou
+      "cancelled" (arrêt utilisateur), les stages jamais atteints passent à
+      "skipped". Les stages déjà terminés restent "completed".
+    Le stage interrompu est mémorisé dans `interrupted_stage` pour que le
+    frontend puisse l'afficher sans le déduire de la progression.
+    """
+    stage_status = report.setdefault("stage_status", {stage: "pending" for stage in PIPELINE_STAGES})
+    for stage in PIPELINE_STAGES:
+        stage_status.setdefault(stage, "pending")
+
     report["terminal_state"] = terminal_state
     report["current"] = terminal_state
+
     if terminal_state == "completed":
         report["stage_status"] = {stage: "completed" for stage in PIPELINE_STAGES}
         report["completed"] = list(PIPELINE_STAGES)
         report["current_index"] = len(PIPELINE_STAGES)
+        report["interrupted_stage"] = None
+    else:
+        active_stage = interrupted_stage or next(
+            (stage for stage in PIPELINE_STAGES if stage_status.get(stage) == "active"),
+            None,
+        )
+        interrupted_label = "cancelled" if terminal_state == "stopped" else "failed"
+        if active_stage and stage_status.get(active_stage) != "completed":
+            stage_status[active_stage] = interrupted_label
+        for stage in PIPELINE_STAGES:
+            if stage_status.get(stage) == "pending":
+                stage_status[stage] = "skipped"
+        # Une double application du terminal (endpoint stop + worker) ne doit
+        # pas effacer le stage interrompu déjà enregistré.
+        report["interrupted_stage"] = active_stage or report.get("interrupted_stage")
+
     report["updated_at"] = datetime.now().isoformat()
+    return report
+
+
+def mark_stage_terminal_state(terminal_state: str, interrupted_stage: Optional[str] = None):
+    report = scan_state.setdefault("stage_report", init_stage_report(scan_state.get("current_stage", "idle")))
+    apply_terminal_to_stage_report(report, terminal_state, interrupted_stage)
     persist_scan_state(scan_state)
+
+
+def compute_scan_lifecycle(state: Dict[str, Any]) -> str:
+    """
+    État canonique du cycle de vie, dérivé une seule fois côté backend :
+    idle | running | completed | failed | timeout | cancelled.
+
+    `is_scanning == False` ne signifie JAMAIS « succès » : seul
+    terminal_state == "completed" l'autorise.
+    """
+    if state.get("is_scanning"):
+        return "running"
+    terminal = (state.get("stage_report") or {}).get("terminal_state")
+    if terminal == "completed":
+        return "completed"
+    if terminal == "timeout":
+        return "timeout"
+    if terminal in ("stopped", "cancelled"):
+        return "cancelled"
+    if terminal in ("failed", "error"):
+        return "failed"
+    # Aucun terminal enregistré : soit aucun scan n'a tourné, soit le backend
+    # s'est arrêté en plein scan (état recovery) — jamais un succès implicite.
+    if state.get("id") and (state.get("progress") or 0) > 0:
+        return "failed" if state.get("error") else "cancelled"
+    return "idle"
+
+
+# Pondération de la progression par stage : 100 % signifie « pipeline complet »,
+# pas « analyse de fichiers terminée ».
+STAGE_PROGRESS_BOUNDS = {
+    "normalize": (0, 5),
+    "index": (5, 10),
+    "analyze": (10, 85),
+    "correlate": (85, 95),
+    "report": (95, 100),
+}
+
+
+def set_scan_progress(stage: str, fraction: float):
+    """
+    Progression stage-aware, monotone, plafonnée à 99 : la valeur 100 est
+    réservée à finalize_success() pour qu'elle signifie toujours
+    « scan réellement complété ».
+    """
+    lo, hi = STAGE_PROGRESS_BOUNDS.get(stage, (0, 0))
+    fraction = min(1.0, max(0.0, float(fraction)))
+    value = min(99, int(round(lo + (hi - lo) * fraction)))
+    scan_state["progress"] = max(int(scan_state.get("progress") or 0), value)
 
 
 def init_scan_telemetry() -> dict:
@@ -208,6 +326,7 @@ def start_scan_stage(stage_name: str) -> float:
     report["current_index"] = _pipeline_stage_index(stage_name)
     report["terminal_state"] = None
     report["updated_at"] = datetime.now().isoformat()
+    set_scan_progress(stage_name, 0.0)
     persist_scan_state(scan_state)
     add_log(f"▶ Stage {stage_name}", "info", stage=stage_name, event="stage_start")
     return time.time()
@@ -231,6 +350,7 @@ def end_scan_stage(stage_name: str, started_at: Optional[float]):
         completed.append(stage_name)
         completed.sort(key=lambda item: PIPELINE_STAGES.index(item))
     report["updated_at"] = datetime.now().isoformat()
+    set_scan_progress(stage_name, 1.0)
     persist_scan_state(scan_state)
     add_log(
         f"✅ Stage {stage_name} terminé ({elapsed_ms:.0f}ms)",
@@ -660,6 +780,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+async def _perf_timing_middleware(request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    _record_endpoint_timing(request.url.path, duration_ms)
+    response.headers["X-Process-Time-Ms"] = f"{duration_ms:.1f}"
+    return response
+
+
+# hasattr : le stub FastAPI des tests unitaires n'expose pas .middleware.
+if hasattr(app, "middleware"):
+    app.middleware("http")(_perf_timing_middleware)
+
+
+async def _run_blocking(fn, *args, **kwargs):
+    """Exécute une fonction bloquante (I/O disque, requests) hors event loop."""
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    return await loop.run_in_executor(None, fn, *args)
+
 # ==========================================
 # 📊 ÉTAT GLOBAL
 # ==========================================
@@ -681,7 +823,9 @@ def new_scan_state() -> Dict[str, Any]:
         "vulnerabilities": [],
         "should_stop": False,
         "estimated_time": "Calcul...",
-        "confidence_score": 0.0,
+        # None = « non calculée » (la corrélation n'a pas abouti). Une valeur
+        # numérique n'existe qu'après un stage correlate réussi.
+        "confidence_score": None,
         "failed_analyses": 0,
         "successful_analyses": 0,
         "report_generated": False,
@@ -739,14 +883,18 @@ def _coerce_scan_state(state: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
-def _atomic_write_json(path: str, payload: Any):
+def _atomic_write_json(path: str, payload: Any, compact: bool = False):
     dir_path = os.path.dirname(path)
     if dir_path:
         os.makedirs(dir_path, exist_ok=True)
     tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+        if compact:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        else:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
     os.replace(tmp_path, path)
+    return os.path.getsize(path)
 
 
 def _atomic_write_text(path: str, value: str):
@@ -795,11 +943,44 @@ def persist_scan_state(state: Dict[str, Any]):
     scan_id = (state or {}).get("id")
     if not scan_id:
         return
+    started = time.perf_counter()
     payload = _serializable_scan_state(state)
     state_file = _scan_state_file_path(scan_id)
     with SCAN_STORE_LOCK:
-        _atomic_write_json(state_file, payload)
+        # Format compact : l'état de scan est un fichier machine (recovery),
+        # l'indentation doublait la taille et le coût de sérialisation.
+        file_bytes = _atomic_write_json(state_file, payload, compact=True)
         _atomic_write_text(LATEST_SCAN_POINTER_FILE, str(scan_id).strip())
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    with PERF_METRICS_LOCK:
+        persist = PERF_METRICS["persist"]
+        persist["count"] += 1
+        persist["total_ms"] = round(persist["total_ms"] + duration_ms, 2)
+        persist["last_ms"] = round(duration_ms, 2)
+        persist["last_bytes"] = int(file_bytes or 0)
+    global _last_persist_ts
+    _last_persist_ts = time.time()
+
+
+_last_persist_ts = 0.0
+
+
+def persist_scan_state_throttled(state: Dict[str, Any]):
+    """
+    Persistance « au fil de l'eau » pendant un scan actif : écrit sur disque au
+    plus une fois toutes les PERSIST_MIN_INTERVAL_S secondes. Les transitions
+    importantes (début/fin de stage, arrêt, échec, fin de scan) continuent de
+    passer par persist_scan_state() qui écrit toujours immédiatement — la
+    fenêtre de perte en cas de crash est donc bornée par cet intervalle.
+    """
+    if PERSIST_MIN_INTERVAL_S <= 0:
+        persist_scan_state(state)
+        return
+    if (time.time() - _last_persist_ts) >= PERSIST_MIN_INTERVAL_S:
+        persist_scan_state(state)
+    else:
+        with PERF_METRICS_LOCK:
+            PERF_METRICS["persist"]["skipped"] += 1
 
 
 def load_scan_state_from_disk(scan_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -827,6 +1008,11 @@ def resolve_scan_id(scan_id: Optional[str] = None) -> Optional[str]:
 
 def load_scan_state_or_latest(scan_id: Optional[str] = None) -> Dict[str, Any]:
     resolved = resolve_scan_id(scan_id)
+    # Lecture mémoire d'abord : le scan courant vit dans scan_state, relire son
+    # fichier disque à chaque requête créait une contention lock + I/O inutile
+    # (et l'état mémoire est par construction plus frais que le disque).
+    if resolved and str(scan_state.get("id") or "") == str(resolved):
+        return _coerce_scan_state(scan_state)
     if resolved:
         loaded = load_scan_state_from_disk(resolved)
         if loaded:
@@ -859,7 +1045,7 @@ def add_log(msg, type="info", stage: Optional[str] = None, event: Optional[str] 
         logs = deque(logs or [], maxlen=LOGS_MAXLEN)
         scan_state["logs"] = logs
     logs.append({"msg": safe_msg, "type": type, "time": ts, "stage": current_stage, "event": event or "log"})
-    persist_scan_state(scan_state)
+    persist_scan_state_throttled(scan_state)
 
 
 def normalize_vuln_id(raw_id: Union[int, str]) -> Union[int, str]:
@@ -2796,7 +2982,7 @@ def run_scan(
         "vulnerabilities": [],
         "should_stop": False,
         "estimated_time": "Calcul...",
-        "confidence_score": 0.0,
+        "confidence_score": None,
         "failed_analyses": 0,
         "successful_analyses": 0,
         "report_generated": False,
@@ -2918,10 +3104,12 @@ def run_scan(
         nonlocal current_stage, stage_started_at, scan_finalized
         if scan_finalized:
             return
+        interrupted = current_stage
         scan_state["is_scanning"] = False
         scan_state["should_stop"] = True
+        scan_state["estimated_time"] = "—"
         scan_state["current_stage"] = "stopped"
-        mark_stage_terminal_state("stopped")
+        mark_stage_terminal_state("stopped", interrupted_stage=interrupted)
         add_log(
             "🏁 finalize scan stopped",
             "warning",
@@ -2941,17 +3129,53 @@ def run_scan(
             exc_text = str(exc)
             details = exc_text if details in {"scan_failed", "correlate_report_failed"} else f"{details}: {exc_text}"
 
+        interrupted = stage_name or current_stage
         scan_state["error"] = details[:500]
+        scan_state["estimated_time"] = "—"
         scan_state["current_stage"] = "failed"
         scan_state["should_stop"] = True
         scan_state["is_scanning"] = False
-        mark_stage_terminal_state("failed")
+        mark_stage_terminal_state("failed", interrupted_stage=interrupted)
         add_log(
             "🏁 finalize scan failed",
             "critical",
-            stage=stage_name or scan_state.get("current_stage"),
+            stage=interrupted,
             event="scan_finalize_failed",
             error=scan_state["error"],
+        )
+        current_stage, stage_started_at = None, None
+        scan_finalized = True
+
+    def finalize_timeout(reason: str, exc: Optional[Exception] = None, stage_name: Optional[str] = None):
+        """
+        Terminal dédié aux timeouts (global ou par stage) : distinct de
+        "failed" pour que le frontend puisse afficher « Scan expiré » sans
+        jamais le confondre avec un échec générique ni avec un succès.
+        La progression n'est PAS modifiée : elle reste à la dernière valeur
+        réellement atteinte.
+        """
+        nonlocal current_stage, stage_started_at, scan_finalized
+        if scan_finalized:
+            return
+
+        details = str(reason or "scan_timeout").strip() or "scan_timeout"
+        if exc is not None and str(exc) and str(exc) != details:
+            details = f"{details}: {exc}" if details != str(exc) else details
+
+        interrupted = stage_name or current_stage
+        scan_state["error"] = details[:500]
+        scan_state["estimated_time"] = "—"
+        scan_state["current_stage"] = "timeout"
+        scan_state["should_stop"] = True
+        scan_state["is_scanning"] = False
+        mark_stage_terminal_state("timeout", interrupted_stage=interrupted)
+        add_log(
+            "🏁 finalize scan timeout",
+            "error",
+            stage=interrupted,
+            event="scan_finalize_timeout",
+            error=scan_state["error"],
+            global_timeout_s=global_timeout_s,
         )
         current_stage, stage_started_at = None, None
         scan_finalized = True
@@ -3058,6 +3282,10 @@ def run_scan(
         
         if total_files == 0:
             add_log("⚠️ Aucun fichier correspondant aux critères.", "warning")
+            # Scan trivialement complet : corrélation vide (confiance 0 calculée
+            # sur zéro finding), rien à rapporter.
+            scan_state["confidence_score"] = 0.0
+            scan_state["report_generated"] = True
             finalize_success(total_time=0.0)
             return
 
@@ -3134,7 +3362,7 @@ def run_scan(
                     if v["severity"] in ["Critical", "High"]:
                         add_log(f"🚨 {v['severity']}: {v['title']} ({filename})", "error")
 
-            scan_state["progress"] = int(((i + 1) / total_files) * 100)
+            set_scan_progress("analyze", (i + 1) / total_files)
 
         if scan_state["should_stop"]:
             finalize_stopped()
@@ -3227,7 +3455,7 @@ def run_scan(
                     event="stage_correlate_timeout",
                     correlate_timeout_s=correlate_timeout_s,
                 )
-                finalize_failed("correlate_timeout", timeout_err, stage_name="correlate")
+                finalize_timeout("correlate_timeout", timeout_err, stage_name="correlate")
             else:
                 raise
         except Exception as correlate_report_err:
@@ -3257,15 +3485,17 @@ def run_scan(
                 event="scan_global_timeout_reached",
                 global_timeout_s=global_timeout_s,
             )
-        finalize_failed("scan_failed", e, stage_name=scan_state.get("current_stage"))
+            finalize_timeout("scan_timeout", e, stage_name=scan_state.get("current_stage"))
+        else:
+            finalize_failed("scan_failed", e, stage_name=scan_state.get("current_stage"))
     finally:
-        if current_stage and scan_state.get("current_stage") not in {"failed", "stopped"}:
+        if current_stage and scan_state.get("current_stage") not in {"failed", "stopped", "timeout"}:
             end_scan_stage(current_stage, stage_started_at)
             current_stage, stage_started_at = None, None
 
-        if scan_state.get("current_stage") in {"completed", "failed", "stopped"}:
+        if scan_state.get("current_stage") in {"completed", "failed", "stopped", "timeout"}:
             scan_state["is_scanning"] = False
-        if scan_state.get("current_stage") in {"failed", "stopped"}:
+        if scan_state.get("current_stage") in {"failed", "stopped", "timeout"}:
             scan_state["should_stop"] = True
 
         persist_scan_state(scan_state)
@@ -3285,6 +3515,140 @@ def run_scan(
 @app.get("/")
 async def root():
     return {"status": "ok", "version": "2.5-stable", "engine": "V2.2-based"}
+
+
+@app.get("/health")
+async def health():
+    """
+    Sonde de vivacité minimale : aucune lecture disque, aucun lock, aucun accès
+    Ollama. Répond tant que l'event loop FastAPI est vivant — c'est exactement
+    ce que le moniteur de santé du frontend doit mesurer.
+    """
+    return {
+        "status": "ok",
+        "uptime_s": round(time.time() - SERVER_STARTED_AT, 1),
+        "is_scanning": bool(scan_state.get("is_scanning")),
+    }
+
+
+def effective_confidence_score(state: Dict[str, Any]) -> Optional[float]:
+    """
+    Confiance réellement disponible. None = non calculée.
+
+    Compatibilité ascendante : les états persistés avant la refonte du state
+    machine portaient 0.0 comme valeur d'initialisation ; si la corrélation n'a
+    jamais abouti, ce 0.0 n'est pas un score et ne doit pas être affiché.
+    """
+    confidence = state.get("confidence_score")
+    if confidence is None:
+        return None
+    report = state.get("stage_report") or {}
+    correlate_done = (
+        (report.get("stage_status") or {}).get("correlate") == "completed"
+        or report.get("terminal_state") == "completed"
+    )
+    if correlate_done:
+        return confidence
+    try:
+        return None if float(confidence) == 0.0 else confidence
+    except (TypeError, ValueError):
+        return None
+
+
+def build_scan_progress_snapshot() -> Dict[str, Any]:
+    """Vue légère de l'état du scan courant, servie depuis la mémoire."""
+    state = scan_state if scan_state.get("id") else load_scan_state_or_latest()
+    telemetry = state.get("telemetry") or {}
+    llm_latency = telemetry.get("llm_latency_ms") or {}
+    start_time = state.get("start_time")
+    elapsed_s = round(time.time() - start_time, 1) if start_time else None
+    logs = state.get("logs")
+    vulns = state.get("vulnerabilities") or []
+    return {
+        "id": state.get("id"),
+        "is_scanning": bool(state.get("is_scanning")),
+        "should_stop": bool(state.get("should_stop")),
+        "lifecycle": compute_scan_lifecycle(state),
+        "progress": state.get("progress", 0),
+        "current_stage": state.get("current_stage", "idle"),
+        "stage_report": state.get("stage_report"),
+        "current_file": state.get("current_file", ""),
+        "estimated_time": state.get("estimated_time"),
+        "stats": state.get("stats"),
+        # None = confiance non calculée (corrélation jamais aboutie).
+        "confidence_score": effective_confidence_score(state),
+        "report_generated": bool(state.get("report_generated")),
+        "profile": state.get("profile"),
+        "mode": state.get("mode"),
+        "target_dir": state.get("target_dir"),
+        "error": state.get("error"),
+        "elapsed_s": elapsed_s,
+        "logs_count": len(logs) if logs is not None else 0,
+        "findings_count": len(vulns),
+        "telemetry": {
+            "files_processed": telemetry.get("files_processed", 0),
+            "files_scheduled": telemetry.get("files_scheduled", 0),
+            "chunks_processed": telemetry.get("chunks_processed", 0),
+            "chunks_total": telemetry.get("chunks_total", 0),
+            "llm_requests": telemetry.get("llm_requests", 0),
+            "llm_errors": telemetry.get("llm_errors", 0),
+            "tokens_estimated_total": telemetry.get("tokens_estimated_total", 0),
+            "llm_latency_ms": {
+                "avg": llm_latency.get("avg", 0.0),
+                "last": llm_latency.get("last", 0.0),
+                "count": llm_latency.get("count", 0),
+            },
+        },
+    }
+
+
+@app.get("/scan/progress")
+async def get_scan_progress():
+    """Progression temps réel : payload court, sans logs ni findings complets."""
+    return build_scan_progress_snapshot()
+
+
+@app.get("/scan/logs")
+async def get_scan_logs(scan_id: Optional[str] = None):
+    """Journal du scan courant (ou d'un scan donné), sans le reste de l'état."""
+    state = load_scan_state_or_latest(scan_id)
+    logs = state.get("logs")
+    if isinstance(logs, deque):
+        logs = list(logs)
+    return {"scan_id": state.get("id"), "logs": logs or [], "count": len(logs or [])}
+
+
+@app.get("/scan/findings")
+async def get_scan_findings(scan_id: Optional[str] = None):
+    """Vulnérabilités + compteurs du scan courant (ou d'un scan donné)."""
+    state = load_scan_state_or_latest(scan_id)
+    vulns = state.get("vulnerabilities") or []
+    return {
+        "scan_id": state.get("id"),
+        "vulnerabilities": vulns,
+        "count": len(vulns),
+        "stats": state.get("stats"),
+        "confidence_score": effective_confidence_score(state),
+        "lifecycle": compute_scan_lifecycle(state),
+    }
+
+
+@app.get("/metrics-lite")
+async def metrics_lite():
+    """Instrumentation légère : latences endpoints + coût de persistance."""
+    with PERF_METRICS_LOCK:
+        snapshot = json.loads(json.dumps(PERF_METRICS))
+    state_file_bytes = None
+    current_id = scan_state.get("id")
+    if current_id:
+        try:
+            state_file_bytes = os.path.getsize(_scan_state_file_path(current_id))
+        except OSError:
+            state_file_bytes = None
+    snapshot["state_file_bytes"] = state_file_bytes
+    snapshot["persist_min_interval_s"] = PERSIST_MIN_INTERVAL_S
+    snapshot["uptime_s"] = round(time.time() - SERVER_STARTED_AT, 1)
+    return snapshot
 
 @app.get("/profiles")
 async def get_profiles():
@@ -3340,7 +3704,9 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 @app.post("/scan/preflight")
 async def scan_preflight(request: ScanRequest):
     try:
-        preflight = build_scan_preflight(
+        # Marche du dépôt + probe Ollama : bloquant, exécuté hors event loop.
+        preflight = await _run_blocking(
+            build_scan_preflight,
             target=request.target,
             profile_key=request.profile,
             mode_key=request.mode,
@@ -3393,7 +3759,10 @@ async def scan_preflight_get(
         resolved_target = latest_state.get("target_dir") or os.getcwd()
 
     try:
-        preflight = build_scan_preflight_summary(
+        # os.walk complet + requête /api/tags Ollama (jusqu'à ~6 s) : jamais
+        # sur l'event loop, sinon toutes les autres requêtes gèlent.
+        preflight = await _run_blocking(
+            build_scan_preflight_summary,
             target=str(resolved_target),
             profile_key=profile,
             mode_key=mode,
@@ -3422,8 +3791,8 @@ async def test_ollama(request: dict):
     try:
         base_url = normalize_ollama_url(url)
         test_url = f"{base_url}/api/tags"
-        
-        response = requests.get(test_url, timeout=5)
+
+        response = await _run_blocking(requests.get, test_url, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
@@ -3455,13 +3824,16 @@ async def stop_scan(scan_id: Optional[str] = None):
         return {"success": False, "message": "Aucun scan trouvé", "scan_id": None}
 
     target_state = load_scan_state_or_latest(resolved_scan_id)
+    interrupted = target_state.get("current_stage")
     target_state["should_stop"] = True
     target_state["is_scanning"] = False
     target_state["current_stage"] = "stopped"
     stage_report = target_state.setdefault("stage_report", init_stage_report("stopped"))
-    stage_report["terminal_state"] = "stopped"
-    stage_report["current"] = "stopped"
-    stage_report["updated_at"] = datetime.now().isoformat()
+    apply_terminal_to_stage_report(
+        stage_report,
+        "stopped",
+        interrupted_stage=interrupted if interrupted in PIPELINE_STAGES else None,
+    )
     persist_scan_state(target_state)
 
     if scan_state.get("id") == resolved_scan_id:
@@ -3483,14 +3855,27 @@ async def get_status(scan_id: Optional[str] = None):
     state = load_scan_state_or_latest(scan_id)
     if "stage_report" not in state:
         state["stage_report"] = init_stage_report(state.get("current_stage", "idle"))
-    return _serializable_scan_state(state)
+    payload = _serializable_scan_state(state)
+    payload["lifecycle"] = compute_scan_lifecycle(state)
+    payload["confidence_score"] = effective_confidence_score(state)
+    return payload
+
+def _read_history_file() -> list:
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        # Fichier vide/corrompu (ex: audit_history.json de 0 octet) : un
+        # historique vide vaut mieux qu'un 500 qui casse la page History.
+        return []
+
 
 @app.get("/history")
 async def get_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, 'r') as f:
-            return json.load(f)
-    return []
+    return await _run_blocking(_read_history_file)
 
 @app.get("/export/json")
 async def export_json(scan_id: Optional[str] = None):
@@ -3556,7 +3941,8 @@ async def export_report_html(scan_id: Optional[str] = None):
     safe_mode = html.escape(str(target_state.get("mode", "N/A")))
     safe_critical = html.escape(str(target_state.get("stats", {}).get("critical", 0)))
     safe_high = html.escape(str(target_state.get("stats", {}).get("high", 0)))
-    safe_conf_score = html.escape(str(target_state.get("confidence_score", 0.0)))
+    raw_conf_score = effective_confidence_score(target_state)
+    safe_conf_score = html.escape("N/A" if raw_conf_score is None else f"{raw_conf_score}%")
 
     html_doc = f"""
     <!DOCTYPE html>
@@ -3593,7 +3979,7 @@ async def export_report_html(scan_id: Optional[str] = None):
             <div style="text-align: right;">
                 <p><strong>Critical:</strong> {safe_critical}</p>
                 <p><strong>High:</strong> {safe_high}</p>
-                <p><strong>Confiance:</strong> {safe_conf_score}%</p>
+                <p><strong>Confiance:</strong> {safe_conf_score}</p>
             </div>
         </div>
         

@@ -1,6 +1,15 @@
 import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { CheckCircle2, Download, FileJson, Filter, Search, ShieldCheck, Terminal } from 'lucide-react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  FileJson,
+  Filter,
+  Search,
+  ShieldCheck,
+  Terminal,
+} from 'lucide-react'
 
 import { PageHeader } from '@/components/nexus/PageHeader'
 import { FindingsTable } from '@/components/nexus/FindingsTable'
@@ -13,9 +22,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { SectionCard } from '@/components/nexus/SectionCard'
 import { useNexus } from '@/hooks/useNexus.jsx'
 import { useToasts } from '@/components/Toast.jsx'
-import { SEVERITIES } from '@/utils/mappers'
+import { INTERRUPTED_STATES, SEVERITIES } from '@/utils/mappers'
 import { shortTargetName } from '@/utils/format'
 import { cn } from '@/lib/utils'
 
@@ -92,11 +102,19 @@ export default function Results() {
   }
 
   const hasScan = status.progress > 0 || findings.length > 0
+  const isCompleted = scanState === 'completed'
+  const isInterrupted = INTERRUPTED_STATES.includes(scanState)
+  const interruptionLabel =
+    scanState === 'timeout'
+      ? 'timeout global atteint'
+      : scanState === 'cancelled'
+        ? 'arrêt utilisateur'
+        : 'erreur du moteur'
 
   return (
     <>
       <PageHeader
-        eyebrow="Résultats d'audit"
+        eyebrow={isInterrupted ? 'Détections partielles' : "Résultats d'audit"}
         title={
           status.target_dir
             ? `${shortTargetName(status.target_dir)} · ${status.mode || 'scan'}`
@@ -106,7 +124,7 @@ export default function Results() {
           hasScan
             ? `${findings.length} vulnérabilité(s) retenue(s) sur ${status.stats?.files || 0} fichier(s) analysé(s)${
                 status.profile ? ` · profil ${status.profile}` : ''
-              }.`
+              }${isInterrupted ? ' · audit interrompu, résultats partiels' : ''}.`
             : 'Aucun résultat disponible pour le moment.'
         }
         actions={
@@ -115,12 +133,18 @@ export default function Results() {
             <Button variant="outline" className="gap-1.5" onClick={() => setLogsOpen(true)}>
               <Terminal className="h-4 w-4" /> Logs
             </Button>
-            <Button variant="outline" className="gap-1.5" onClick={() => downloadReport(status.id)}>
-              <Download className="h-4 w-4" /> Rapport HTML
-            </Button>
-            <Button variant="outline" className="gap-1.5" onClick={() => downloadJson(status.id)}>
-              <FileJson className="h-4 w-4" /> JSON
-            </Button>
+            {/* Le rapport final n'existe que pour un audit complété : pas de
+                bouton d'export de rapport pour un scan interrompu. */}
+            {isCompleted && (
+              <Button variant="outline" className="gap-1.5" onClick={() => downloadReport(status.id)}>
+                <Download className="h-4 w-4" /> Rapport HTML
+              </Button>
+            )}
+            {(isCompleted || findings.length > 0) && (
+              <Button variant="outline" className="gap-1.5" onClick={() => downloadJson(status.id)}>
+                <FileJson className="h-4 w-4" /> JSON{isInterrupted ? ' (partiel)' : ''}
+              </Button>
+            )}
             <Button asChild className="gap-1.5">
               <Link to="/scan/new">
                 <ShieldCheck className="h-4 w-4" /> Nouvel audit
@@ -129,6 +153,22 @@ export default function Results() {
           </>
         }
       />
+
+      {isInterrupted && hasScan && (
+        <SectionCard className="mb-5 border-medium/40 bg-medium/5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-medium" />
+            <div className="min-w-0 text-sm">
+              <span className="font-semibold">Audit interrompu ({interruptionLabel}).</span>{' '}
+              <span className="text-muted-foreground">
+                Les détections listées sont partielles : la corrélation n'a pas abouti (confiance non
+                calculée) et le rapport final n'a pas été généré. Progression atteinte :{' '}
+                {Math.round(Number(status.progress) || 0)}%.
+              </span>
+            </div>
+          </div>
+        </SectionCard>
+      )}
 
       {findings.length === 0 ? (
         <EmptyState
@@ -170,7 +210,7 @@ export default function Results() {
             <ExecutiveView
               findings={findings}
               counts={severityCounts}
-              confidence={Number(status.confidence_score) || 0}
+              confidence={status.confidence_score ?? null}
               target={status.target_dir ? shortTargetName(status.target_dir) : null}
               onSelect={(finding) => setSelectedId(finding.id)}
             />

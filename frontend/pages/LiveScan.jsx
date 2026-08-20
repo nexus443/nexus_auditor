@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Activity, FileCode2, ListChecks, Radio, Sparkles, Square } from 'lucide-react'
+import { Activity, AlertTriangle, FileCode2, ListChecks, Radio, Sparkles, Square } from 'lucide-react'
 
 import { PageHeader } from '@/components/nexus/PageHeader'
 import { SectionCard } from '@/components/nexus/SectionCard'
@@ -14,14 +14,46 @@ import { useNexus } from '@/hooks/useNexus.jsx'
 import { useToasts } from '@/components/Toast.jsx'
 import { formatNumber, shortTargetName } from '@/utils/format'
 
+const TERMINAL_HEADINGS = {
+  completed: { eyebrow: 'Terminé', banner: null },
+  timeout: {
+    eyebrow: 'Scan expiré',
+    banner: {
+      title: 'Scan expiré (timeout global atteint)',
+      description:
+        "L'audit a été interrompu avant la fin du pipeline. Les détections ci-dessous sont partielles : la corrélation et le rapport final n'ont pas été exécutés.",
+    },
+  },
+  failed: {
+    eyebrow: 'Échec',
+    banner: {
+      title: 'Scan en échec',
+      description:
+        "L'audit s'est interrompu sur une erreur. Les détections ci-dessous sont partielles : la corrélation et le rapport final n'ont pas été exécutés.",
+    },
+  },
+  cancelled: {
+    eyebrow: 'Arrêté',
+    banner: {
+      title: "Scan arrêté par l'utilisateur",
+      description:
+        'Les détections déjà remontées sont conservées, mais elles sont partielles : le pipeline ne s’est pas exécuté jusqu’au bout.',
+    },
+  },
+}
+
 export default function LiveScan() {
-  const { status, stageReport, findings, isScanning, scanState, stopScan, runtime } = useNexus()
+  const { status, stageReport, findings, isScanning, scanState, hasResults, stopScan, runtime } =
+    useNexus()
   const toast = useToasts()
   const [logLevelFilter, setLogLevelFilter] = useState('all')
 
   const telemetry = status.telemetry || {}
   const progress = Math.max(0, Math.min(100, Number(status.progress) || 0))
   const started = isScanning || progress > 0
+  const recentFindings = useMemo(() => [...findings].reverse(), [findings])
+  const terminalInfo = TERMINAL_HEADINGS[scanState] || null
+  const interrupted = Boolean(terminalInfo?.banner)
 
   const copyLine = (log) => {
     navigator.clipboard?.writeText(`[${log.time}] ${log.msg}`)
@@ -55,7 +87,9 @@ export default function LiveScan() {
               </Button>
               {findings.length > 0 && (
                 <Button asChild variant="outline">
-                  <Link to="/results">Voir les derniers résultats</Link>
+                  <Link to="/results">
+                    {hasResults ? 'Voir les derniers résultats' : 'Voir les détections partielles'}
+                  </Link>
                 </Button>
               )}
             </>
@@ -68,7 +102,7 @@ export default function LiveScan() {
   return (
     <>
       <PageHeader
-        eyebrow={isScanning ? 'En cours' : 'Terminé'}
+        eyebrow={isScanning ? 'En cours' : terminalInfo?.eyebrow || 'Interrompu'}
         title={`Scan · ${shortTargetName(status.target_dir)}`}
         description="Les vulnérabilités apparaissent au fil de l'analyse. L'exécution reste locale à votre infrastructure."
         actions={
@@ -78,16 +112,55 @@ export default function LiveScan() {
               <Button variant="outline" className="gap-1.5" onClick={stopScan}>
                 <Square className="h-4 w-4" /> Arrêter le scan
               </Button>
-            ) : (
+            ) : hasResults ? (
               <Button asChild className="gap-1.5">
                 <Link to="/results">
                   <ListChecks className="h-4 w-4" /> Voir les résultats
                 </Link>
               </Button>
-            )}
+            ) : findings.length > 0 ? (
+              <Button asChild variant="outline" className="gap-1.5">
+                <Link to="/results">
+                  <ListChecks className="h-4 w-4" /> Voir les détections partielles
+                </Link>
+              </Button>
+            ) : null}
           </>
         }
       />
+
+      {interrupted && (
+        <SectionCard className="mb-5 border-medium/40 bg-medium/5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-medium" />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">{terminalInfo.banner.title}</div>
+              <p className="mt-1 text-sm text-muted-foreground">{terminalInfo.banner.description}</p>
+              <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
+                <Fact label="Progression atteinte" value={`${Math.round(progress)}%`} />
+                <Fact
+                  label="Dernier stage"
+                  value={stageReport.interruptedStage || status.current_stage || '—'}
+                />
+                <Fact
+                  label="Fichiers traités"
+                  value={`${formatNumber(telemetry.files_processed ?? 0)}${
+                    telemetry.files_scheduled ? ` / ${formatNumber(telemetry.files_scheduled)}` : ''
+                  }`}
+                />
+                <Fact label="Détections partielles" value={formatNumber(findings.length)} />
+                <Fact label="Confiance" value="Non calculée" />
+                <Fact label="Rapport final" value="Non généré" />
+              </dl>
+              {status.error && (
+                <p className="mt-2 truncate font-mono text-xs text-muted-foreground" title={status.error}>
+                  {status.error}
+                </p>
+              )}
+            </div>
+          </div>
+        </SectionCard>
+      )}
 
       <StageTimeline
         stages={stageReport.stages}
@@ -186,7 +259,7 @@ export default function LiveScan() {
             </p>
           ) : (
             <ul className="max-h-80 divide-y divide-border/60 overflow-y-auto custom-scrollbar">
-              {[...findings].reverse().map((f) => (
+              {recentFindings.map((f) => (
                 <li key={f.id} className="flex items-start gap-3 py-3 first:pt-0">
                   <SeverityBadge severity={f.severity} label={f.severityLabel} />
                   <div className="min-w-0 flex-1">
@@ -224,6 +297,15 @@ function compactNumber(value) {
   if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`
   if (number >= 1000) return `${Math.round(number / 1000)}k`
   return String(number)
+}
+
+function Fact({ label, value }) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="font-mono font-medium">{value}</dd>
+    </div>
+  )
 }
 
 function Mini({ label, value }) {

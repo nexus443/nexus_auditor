@@ -180,14 +180,17 @@ class WatchdogAndTimeoutTests(unittest.TestCase):
                     scan_id="scan_watchdog_timeout",
                 )
 
-        self.assertEqual(backend_module.scan_state.get("current_stage"), "failed")
+        self.assertEqual(backend_module.scan_state.get("current_stage"), "timeout")
         self.assertFalse(backend_module.scan_state.get("is_scanning"))
         self.assertTrue(backend_module.scan_state.get("should_stop"))
         self.assertIn("Global scan timeout", str(backend_module.scan_state.get("error", "")))
+        stage_report = backend_module.scan_state.get("stage_report", {})
+        self.assertEqual(stage_report.get("terminal_state"), "timeout")
+        self.assertEqual(backend_module.compute_scan_lifecycle(backend_module.scan_state), "timeout")
 
         persisted = backend_module.load_scan_state_from_disk("scan_watchdog_timeout")
         self.assertIsNotNone(persisted)
-        self.assertEqual(persisted.get("current_stage"), "failed")
+        self.assertEqual(persisted.get("current_stage"), "timeout")
         self.assertFalse(persisted.get("is_scanning"))
 
     def test_run_scan_correlate_exception_marks_failed_without_stuck_stage(self):
@@ -267,12 +270,17 @@ class WatchdogAndTimeoutTests(unittest.TestCase):
                     scan_id="scan_corr_timeout",
                 )
 
-        self.assertEqual(backend_module.scan_state.get("current_stage"), "failed")
+        self.assertEqual(backend_module.scan_state.get("current_stage"), "timeout")
         self.assertFalse(backend_module.scan_state.get("is_scanning"))
         self.assertTrue(backend_module.scan_state.get("should_stop"))
         self.assertIn("correlate_timeout", str(backend_module.scan_state.get("error", "")))
         stage_report = backend_module.scan_state.get("stage_report", {})
-        self.assertEqual(stage_report.get("terminal_state"), "failed")
+        self.assertEqual(stage_report.get("terminal_state"), "timeout")
+        self.assertEqual(stage_report.get("stage_status", {}).get("correlate"), "failed")
+        self.assertEqual(stage_report.get("stage_status", {}).get("report"), "skipped")
+        # La confiance n'a jamais été calculée : elle reste indisponible.
+        self.assertIsNone(backend_module.scan_state.get("confidence_score"))
+        self.assertLess(int(backend_module.scan_state.get("progress") or 0), 100)
 
     def test_run_scan_success_finalizes_report_stage(self):
         class FakeEngine:
@@ -313,6 +321,10 @@ class WatchdogAndTimeoutTests(unittest.TestCase):
         self.assertTrue(backend_module.scan_state.get("report_generated"))
         stage_report = backend_module.scan_state.get("stage_report", {})
         self.assertEqual(stage_report.get("terminal_state"), "completed")
+        # Un scan complété atteint exactement 100 %, avec une confiance calculée.
+        self.assertEqual(int(backend_module.scan_state.get("progress")), 100)
+        self.assertEqual(backend_module.scan_state.get("confidence_score"), 88.5)
+        self.assertEqual(backend_module.compute_scan_lifecycle(backend_module.scan_state), "completed")
         mock_save_history.assert_called_once()
 
 

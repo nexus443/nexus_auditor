@@ -3,12 +3,15 @@ import { cn } from '@/lib/utils'
 const map = {
   completed: { label: 'Terminé', c: 'bg-success/15 text-success ring-success/30' },
   failed: { label: 'Échec', c: 'bg-critical/15 text-critical ring-critical/30' },
+  timeout: { label: 'Timeout', c: 'bg-medium/15 text-medium ring-medium/30' },
   running: { label: 'En cours', c: 'bg-primary/15 text-primary ring-primary/30' },
+  cancelled: { label: 'Arrêté', c: 'bg-muted text-muted-foreground ring-border' },
   stopped: { label: 'Arrêté', c: 'bg-muted text-muted-foreground ring-border' },
+  idle: { label: 'Inactif', c: 'bg-muted text-muted-foreground ring-border' },
 }
 
 export function StatusPill({ status }) {
-  const m = map[status] || map.stopped
+  const m = map[status] || map.idle
   return (
     <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1', m.c)}>
       <span

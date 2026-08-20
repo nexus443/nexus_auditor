@@ -5,7 +5,7 @@ import { ScoreRing } from './ScoreRing'
 import { SeverityBar } from './SeverityBar'
 import { SeverityBadge } from './SeverityBadge'
 import { Button } from '@/components/ui/button'
-import { sortByRisk, totalFindings } from '@/utils/mappers'
+import { formatConfidence, sortByRisk, totalFindings } from '@/utils/mappers'
 import { cn } from '@/lib/utils'
 
 /**
@@ -96,7 +96,7 @@ export function ExecutiveView({ findings, counts, confidence, target, onSelect }
             <Row label="High" value={counts.high} tone="text-high" />
             <Row label="Medium" value={counts.medium} tone="text-medium" />
             <Row label="Low" value={counts.low} tone="text-low" />
-            <Row label="Confiance moyenne" value={`${Math.round(confidence)}%`} />
+            <Row label="Confiance moyenne" value={formatConfidence(confidence)} />
           </dl>
         </SectionCard>
       </div>

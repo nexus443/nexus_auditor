@@ -19,9 +19,13 @@ import { formatDateTime, formatDuration } from '@/utils/format'
  * qui n'existe pas côté backend : il n'a pas été reproduit.
  */
 export default function Reports() {
-  const { history, historyLoading, status, downloadReport, downloadJson } = useNexus()
+  const { history, historyLoading, status, scanState, findings, downloadReport, downloadJson } =
+    useNexus()
 
   const currentScanId = status.id
+  // Le rapport final n'existe que si l'audit est réellement complété :
+  // `!is_scanning` ne signifie pas « terminé » (timeout/échec/annulation).
+  const currentCompleted = scanState === 'completed'
 
   return (
     <>
@@ -36,7 +40,7 @@ export default function Reports() {
           title="Audit courant"
           description="Dernier audit chargé dans l'interface"
           className="mb-5"
-          actions={<StatusPill status={status.is_scanning ? 'running' : 'completed'} />}
+          actions={<StatusPill status={scanState} />}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
@@ -48,12 +52,24 @@ export default function Reports() {
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" className="gap-1.5" onClick={() => downloadReport(currentScanId)}>
-                <Download className="h-3.5 w-3.5" /> HTML
-              </Button>
-              <Button size="sm" variant="outline" className="gap-1.5" onClick={() => downloadJson(currentScanId)}>
-                <FileJson className="h-3.5 w-3.5" /> JSON
-              </Button>
+              {currentCompleted ? (
+                <>
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => downloadReport(currentScanId)}>
+                    <Download className="h-3.5 w-3.5" /> HTML
+                  </Button>
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => downloadJson(currentScanId)}>
+                    <FileJson className="h-3.5 w-3.5" /> JSON
+                  </Button>
+                </>
+              ) : findings.length > 0 && !status.is_scanning ? (
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => downloadJson(currentScanId)}>
+                  <FileJson className="h-3.5 w-3.5" /> JSON (partiel)
+                </Button>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  {status.is_scanning ? 'Audit en cours…' : 'Rapport final indisponible (audit non complété)'}
+                </span>
+              )}
             </div>
           </div>
         </SectionCard>

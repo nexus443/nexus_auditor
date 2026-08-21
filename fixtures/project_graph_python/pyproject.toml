@@ -1,0 +1,6 @@
+[project]
+name = "nexus-project-graph-fixture"
+version = "0.0.0"
+
+[project.scripts]
+nexus-fixture = "app.services:execute_command"

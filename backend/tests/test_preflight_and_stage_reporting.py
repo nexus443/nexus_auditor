@@ -103,6 +103,8 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.middleware.cors"] = cors_stub
 
 from backend import backend as backend_module
+from backend.analysis_context import AnalysisUnitBuilder, ContextPackBuilder, ReachabilityAnalyzer
+from backend.project_graph import ProjectGraphBuilder
 
 
 class PreflightAndStageReportingTests(unittest.TestCase):
@@ -318,5 +320,113 @@ class PreflightAndStageReportingTests(unittest.TestCase):
         self.assertTrue(any("partial" in w.lower() for w in warnings))
 
 
+class AnalysisUnitEngineIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "fixtures", "project_graph_python")
+        )
+        graph = ProjectGraphBuilder(cls.fixture_root).build()
+        reachability = ReachabilityAnalyzer().analyze(graph)
+        cls.unit = next(
+            unit for unit in AnalysisUnitBuilder().build(graph, reachability)
+            if unit.entrypoint == "POST /run"
+        )
+
+    def setUp(self):
+        self._saved_scan_state = copy.deepcopy(backend_module.scan_state)
+
+    def tearDown(self):
+        backend_module.scan_state.clear()
+        backend_module.scan_state.update(copy.deepcopy(self._saved_scan_state))
+
+    def test_stable_engine_scans_context_pack_and_preserves_graph_metadata(self):
+        pack = ContextPackBuilder().build(self.unit)
+        engine = backend_module.StableEngine(
+            backend_module.POWER_PROFILES["balanced"],
+            backend_module.SCAN_MODES["deep"],
+            budget_plan={"retries": 1, "enable_verify_pass": False},
+            profile_name="balanced",
+        )
+        model_result = {
+            "data": [{
+                "title": "Command injection",
+                "type": "COMMAND_INJECTION",
+                "severity": "High",
+                "confidence": 92,
+                "file": "app/repository.py",
+                "evidence": "return os.system(user_input)",
+                "description": "User-controlled input reaches a command shell",
+                "impact": "Command execution",
+                "recommendation": "Avoid invoking a shell",
+            }],
+            "raw": "[]",
+        }
+        backend_module.scan_state["should_stop"] = False
+        with patch.object(engine, "call_ollama", return_value=model_result), patch.object(
+            backend_module,
+            "apply_mode_filters",
+            side_effect=lambda findings, *_args, **_kwargs: findings,
+        ):
+            findings = engine.scan_analysis_unit(self.unit, pack, {"mode_key": "deep"})
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["file"], "app/repository.py")
+        self.assertEqual(findings[0]["analysis_unit_id"], self.unit.id)
+        self.assertEqual(findings[0]["reachability"], "confirmed")
+        self.assertEqual(findings[0]["call_path"][:3], self.unit.call_path[:3])
+
+    def test_model_role_contract_defaults_to_current_model(self):
+        profile = dict(backend_module.POWER_PROFILES["eco"])
+        engine = backend_module.StableEngine(profile, backend_module.SCAN_MODES["rapid"])
+        self.assertEqual(
+            engine.model_roles,
+            {
+                "understanding_model": profile["model"],
+                "security_model": profile["model"],
+                "verifier_model": profile["model"],
+            },
+        )
+
+    def test_run_scan_prefers_analysis_unit_and_skips_covered_file_fallback(self):
+        class FakeEngine:
+            unit_entrypoints = []
+            file_paths = []
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def scan_analysis_unit(self, unit, **kwargs):
+                self.unit_entrypoints.append(unit.entrypoint)
+                return []
+
+            def scan_file(self, filepath, filename, analysis_context=None):
+                self.file_paths.append(filepath)
+                return []
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            with open(os.path.join(repo_dir, "app.py"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "from fastapi import FastAPI\n"
+                    "app = FastAPI()\n\n"
+                    "@app.get('/health')\n"
+                    "def health():\n"
+                    "    return {'ok': True}\n"
+                )
+            with patch.object(backend_module, "ensure_model_available", return_value=True), patch.object(
+                backend_module, "StableEngine", FakeEngine
+            ), patch.object(backend_module, "persist_scan_state"), patch.object(
+                backend_module, "save_to_history"
+            ):
+                backend_module.run_scan(repo_dir, "balanced", "deep", scan_id="graph-unit-test")
+
+        self.assertEqual(FakeEngine.unit_entrypoints, ["GET /health"])
+        self.assertEqual(FakeEngine.file_paths, [])
+        understanding = backend_module.scan_state.get("application_understanding", {})
+        self.assertEqual(understanding.get("status"), "ready")
+        self.assertEqual(understanding.get("analysis_units", {}).get("runtime"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+

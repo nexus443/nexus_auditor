@@ -44,6 +44,25 @@ try:
 except ImportError:
     from aggregation import aggregate_findings, ensure_proof
 
+try:
+    from .project_graph import ProjectGraphBuilder, normalize_relative_path
+    from .analysis_context import (
+        AnalysisUnit,
+        AnalysisUnitBuilder,
+        ContextPack,
+        ContextPackBuilder,
+        ReachabilityAnalyzer,
+    )
+except ImportError:
+    from project_graph import ProjectGraphBuilder, normalize_relative_path
+    from analysis_context import (
+        AnalysisUnit,
+        AnalysisUnitBuilder,
+        ContextPack,
+        ContextPackBuilder,
+        ReachabilityAnalyzer,
+    )
+
 # ==========================================
 # ⚙️ NEXUS AUDITOR V3.0 STABLE
 # ==========================================
@@ -685,6 +704,17 @@ SCAN_MODES = {
 BUDGET_CONTROLLER = LLMBudgetController()
 MODE_CONTROLLER = ScanModeController()
 
+
+def resolve_model_roles(profile_config: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve future multi-model roles without changing today's model selection."""
+    default_model = str(profile_config.get("model", "qwen2.5-coder:7b"))
+    configured_roles = profile_config.get("model_roles") or {}
+    return {
+        "understanding_model": str(configured_roles.get("understanding_model", default_model)),
+        "security_model": str(configured_roles.get("security_model", default_model)),
+        "verifier_model": str(configured_roles.get("verifier_model", default_model)),
+    }
+
 # ==========================================
 # 🚫 FICHIERS BUILD-TIME À IGNORER (Rapid/Deep)
 # ==========================================
@@ -835,6 +865,7 @@ def new_scan_state() -> Dict[str, Any]:
         "budget_info": {},
         "preflight": {},
         "telemetry": init_scan_telemetry(),
+        "application_understanding": {},
     }
 
 
@@ -1724,6 +1755,9 @@ class StableEngine:
         self.budget_plan = budget_plan or {}
         self.profile_name = profile_name or str(self.budget_plan.get("profile") or "balanced")
         self.ollama_base_url = ollama_base_url or OLLAMA_BASE_URL  # Custom ou défaut
+        # V1 contract separation: all roles intentionally default to the current
+        # profile model until a later multi-model workflow is introduced.
+        self.model_roles = resolve_model_roles(self.profile)
 
     def _build_llm_options(
         self,
@@ -1849,7 +1883,12 @@ class StableEngine:
         read_timeout_s = max(1, read_timeout_s)
         connect_timeout_s = max(1, connect_timeout_s)
         request_timeout = (connect_timeout_s, read_timeout_s)
-        model = self.profile["model"]
+        if purpose in {"verify", "verification"}:
+            model = self.model_roles["verifier_model"]
+        elif purpose in {"understanding", "index"}:
+            model = self.model_roles["understanding_model"]
+        else:
+            model = self.model_roles["security_model"]
 
         if max_retries is None:
             max_retries = int(self.budget_plan.get("retries", 1))
@@ -2155,6 +2194,10 @@ class StableEngine:
                             normalized["chunk_index"] = i + 1
                             normalized["chunk_total"] = len(chunks)
                             normalized["chunk_refs"] = [i + 1]
+                            normalized["reachability"] = analysis_context.get("reachability", "not_applicable")
+                            normalized["call_path"] = list(analysis_context.get("call_path") or [])
+                            normalized["analysis_unit_id"] = analysis_context.get("analysis_unit_id")
+                            normalized["graph_confidence"] = analysis_context.get("graph_confidence")
                             
                             # Ajustement confiance si chunk partiel
                             if len(chunks) > 1:
@@ -2226,6 +2269,187 @@ class StableEngine:
             add_log(f"❌ Erreur analyse {filename}: {e}", "error")
             scan_state["failed_analyses"] += 1
             return []
+
+    def scan_analysis_unit(
+        self,
+        unit: AnalysisUnit,
+        context_pack: Optional[ContextPack] = None,
+        analysis_context: Optional[dict] = None,
+    ) -> list:
+        """Analyze a bounded inter-file ContextPack with the existing security engine.
+
+        Parsing, normalization, hard gates, verification, and aggregation deliberately
+        reuse the file-oriented contracts.  ``scan_file`` remains the fallback for
+        files that cannot be represented by a reliable AnalysisUnit.
+        """
+        if scan_state["should_stop"]:
+            return []
+
+        analysis_context = analysis_context or {}
+        context_pack = context_pack or ContextPackBuilder().build(unit)
+        label = f"AnalysisUnit {unit.entrypoint}"
+        mode_key = MODE_CONTROLLER.resolve_mode_key(
+            mode_key=analysis_context.get("mode_key"),
+            mode_config=self.mode,
+        )
+        pack_text = str(context_pack.text or "")
+        if not pack_text.strip():
+            return []
+
+        telemetry = scan_state.setdefault("telemetry", init_scan_telemetry())
+        estimated_tokens = estimate_tokens_from_text(pack_text)
+        telemetry["chunks_total"] += 1
+        telemetry["chunks_processed"] += 1
+        telemetry["tokens_estimated_total"] += estimated_tokens
+        telemetry["chunks_by_file"][unit.id] = 1
+        telemetry["tokens_estimated_by_file"][unit.id] = estimated_tokens
+        add_log(
+            f"🧭 {label}: {len(unit.files)} fichier(s), ~{estimated_tokens} tokens",
+            "info",
+            stage="analyze",
+            event="analysis_unit_start",
+            analysis_unit_id=unit.id,
+            entrypoint=unit.entrypoint,
+            reachability=unit.reachability,
+            graph_confidence=unit.graph_confidence,
+            files=[item.get("path") for item in unit.files],
+        )
+
+        prompt = MODE_CONTROLLER.build_analysis_prompt(
+            mode_key=mode_key,
+            filename=label,
+            content=pack_text,
+            language="project-context",
+            chunk_index=1,
+            chunk_total=1,
+            hotspot_reasons=analysis_context.get("hotspot_reasons", ["inter-file-flow"]),
+            cross_file_hints=[
+                f"Reachability is {unit.reachability}; unknown must not be interpreted as unreachable.",
+                f"Only report evidence present in one of these files: {', '.join(item.get('path', '') for item in unit.files)}",
+            ],
+        )
+        result = self.call_ollama(
+            prompt,
+            label,
+            max_retries=self.budget_plan.get("retries"),
+            chunk_index=1,
+            chunk_total=1,
+            purpose="security",
+        )
+        if not result:
+            scan_state["failed_analyses"] += 1
+            return []
+
+        data = result.get("data")
+        raw_response = result.get("raw", "")
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            scan_state["failed_analyses"] += 1
+            return []
+
+        allowed_relative_paths = [
+            str(item.get("path", "")).replace("\\", "/")
+            for item in unit.files
+            if item.get("path")
+        ]
+        fallback_relative = (
+            next((item for item in allowed_relative_paths if item == self._entrypoint_relative_path(unit)), None)
+            or (allowed_relative_paths[0] if allowed_relative_paths else self._entrypoint_relative_path(unit))
+        )
+        findings_by_path: Dict[str, List[dict]] = {}
+        content_by_path: Dict[str, str] = {}
+
+        for vulnerability in data:
+            if not isinstance(vulnerability, dict):
+                continue
+            relative = self._resolve_analysis_unit_finding_path(
+                vulnerability.get("file"),
+                allowed_relative_paths,
+                fallback_relative,
+            )
+            filepath = os.path.abspath(os.path.join(unit.project_root, relative))
+            try:
+                if os.path.commonpath([os.path.abspath(unit.project_root), filepath]) != os.path.abspath(unit.project_root):
+                    continue
+            except ValueError:
+                continue
+            if relative not in content_by_path:
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+                        content_by_path[relative] = handle.read()
+                except OSError:
+                    content_by_path[relative] = ""
+            normalized = normalize_vulnerability(
+                vulnerability,
+                filepath,
+                relative,
+                raw_response,
+                content_by_path[relative],
+            )
+            normalized.update({
+                "chunk_index": 1,
+                "chunk_total": 1,
+                "chunk_refs": [1],
+                "analysis_unit_id": unit.id,
+                "entrypoint": unit.entrypoint,
+                "entrypoint_type": unit.entrypoint_type,
+                "reachability": unit.reachability,
+                "call_path": list(unit.call_path),
+                "graph_confidence": unit.graph_confidence,
+                "graph_uncertainties": list(unit.uncertainties),
+            })
+            findings_by_path.setdefault(relative, []).append(normalized)
+
+        normalized_findings = [finding for findings in findings_by_path.values() for finding in findings]
+        if normalized_findings and self.budget_plan.get("enable_verify_pass", False):
+            normalized_findings = self._verify_findings_for_chunk(
+                filename=label,
+                chunk=pack_text,
+                findings=normalized_findings,
+                chunk_index=1,
+                chunk_total=1,
+            )
+            findings_by_path = {}
+            for finding in normalized_findings:
+                findings_by_path.setdefault(str(finding.get("file") or fallback_relative), []).append(finding)
+
+        filtered: List[dict] = []
+        for relative, findings in findings_by_path.items():
+            filepath = os.path.abspath(os.path.join(unit.project_root, relative))
+            filtered.extend(apply_mode_filters(findings, self.mode, filepath, content_by_path.get(relative, "")))
+
+        deduped = aggregate_findings(
+            filtered,
+            profile_key=self.profile_name,
+            verify_expected=bool(self.budget_plan.get("enable_verify_pass", False)),
+        )
+        scan_state["successful_analyses"] += 1
+        return deduped
+
+    @staticmethod
+    def _entrypoint_relative_path(unit: AnalysisUnit) -> str:
+        for snippet in unit.snippets:
+            if snippet.get("symbol") == (unit.call_path[0] if unit.call_path else None):
+                return str(snippet.get("path", ""))
+        return str(unit.files[0].get("path", "")) if unit.files else ""
+
+    @staticmethod
+    def _resolve_analysis_unit_finding_path(
+        model_path: Any,
+        allowed_relative_paths: List[str],
+        fallback_relative: str,
+    ) -> str:
+        raw = str(model_path or "").replace("\\", "/").lstrip("./")
+        if raw in allowed_relative_paths:
+            return raw
+        suffix_matches = [path for path in allowed_relative_paths if raw and path.endswith(f"/{raw}")]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+        basename_matches = [path for path in allowed_relative_paths if os.path.basename(path) == os.path.basename(raw)]
+        if len(basename_matches) == 1:
+            return basename_matches[0]
+        return fallback_relative
 
 
 # ==========================================
@@ -3001,7 +3225,8 @@ def run_scan(
             "correlate_timeout_s": correlate_timeout_s,
         },
         "preflight": {},
-        "telemetry": init_scan_telemetry()
+        "telemetry": init_scan_telemetry(),
+        "application_understanding": {},
     })
     persist_scan_state(scan_state)
 
@@ -3271,6 +3496,72 @@ def run_scan(
             "mode_strategy": resolved_mode_key,
         }
 
+        project_graph = None
+        graph_reachability: Dict[str, Any] = {}
+        analysis_units: List[AnalysisUnit] = []
+        try:
+            project_graph = ProjectGraphBuilder(target_dir).build()
+            graph_reachability = ReachabilityAnalyzer().analyze(project_graph)
+            analysis_units = AnalysisUnitBuilder().build(project_graph, graph_reachability)
+            graph_nodes = len(project_graph.nodes)
+            graph_edges = len(project_graph.edges)
+            graph_entrypoints = sum(1 for node in project_graph.nodes.values() if node.kind == "entrypoint")
+            runtime_units = sum(1 for unit in analysis_units if unit.reachability != "test_only")
+            test_units = sum(1 for unit in analysis_units if unit.reachability == "test_only")
+            telemetry.update({
+                "graph_nodes": graph_nodes,
+                "graph_edges": graph_edges,
+                "graph_entrypoints": graph_entrypoints,
+                "analysis_units": len(analysis_units),
+            })
+            scan_state["application_understanding"] = {
+                "status": "ready",
+                "project_graph": {
+                    "nodes": graph_nodes,
+                    "edges": graph_edges,
+                    "entrypoints": graph_entrypoints,
+                    "extractors": project_graph.metadata.get("extractors", []),
+                    "parse_errors": project_graph.metadata.get("parse_errors", []),
+                    "reachability_counts": project_graph.metadata.get("reachability", {}).get("counts", {}),
+                },
+                "analysis_units": {
+                    "total": len(analysis_units),
+                    "runtime": runtime_units,
+                    "test_only": test_units,
+                    "items": [unit.to_dict() for unit in analysis_units[:50]],
+                },
+                "model_roles": resolve_model_roles(profile),
+            }
+            add_log(
+                f"🧠 ProjectGraph: {graph_nodes} nodes, {graph_edges} edges, "
+                f"{graph_entrypoints} entrypoint(s), {len(analysis_units)} unit(s)",
+                "info",
+                stage="index",
+                event="project_graph_ready",
+                graph_nodes=graph_nodes,
+                graph_edges=graph_edges,
+                entrypoints=graph_entrypoints,
+                analysis_units=len(analysis_units),
+                runtime_units=runtime_units,
+                test_units=test_units,
+            )
+        except Exception as graph_error:
+            # Graph understanding is additive in V1; a parser failure must preserve
+            # the stable chunk/file analysis path.
+            project_graph = None
+            graph_reachability = {}
+            analysis_units = []
+            scan_state["application_understanding"] = {
+                "status": "fallback",
+                "reason": f"{type(graph_error).__name__}: {graph_error}",
+            }
+            add_log(
+                f"⚠️ ProjectGraph indisponible, fallback scan_file: {graph_error}",
+                "warning",
+                stage="index",
+                event="project_graph_fallback",
+            )
+
         add_log(
             f"📂 Index terminé: {total_files} fichier(s) planifié(s)",
             "info",
@@ -3301,6 +3592,91 @@ def run_scan(
         )
         start_ts = time.time()
         cross_file_hints: List[str] = []
+        scheduled_paths = {
+            os.path.abspath(entry.get("path"))
+            for entry in file_entries
+            if entry.get("path")
+        }
+        covered_paths: set = set()
+
+        def record_findings(findings: List[dict], source_label: str) -> None:
+            for finding in findings or []:
+                finding["id"] = len(scan_state["vulnerabilities"]) + 1
+                scan_state["vulnerabilities"].append(finding)
+                severity_key = str(finding.get("severity", "")).lower()
+                if severity_key in scan_state["stats"]:
+                    scan_state["stats"][severity_key] += 1
+                finding_log_level = "warning" if severity_key in {"critical", "high"} else "info"
+                add_log(
+                    f"🚨 {finding.get('severity', 'Unknown')}: {finding.get('title', 'Untitled')} ({source_label})",
+                    finding_log_level,
+                    stage="analyze",
+                    event="finding_detected",
+                    finding_severity=finding.get("severity", "Unknown"),
+                    finding_title=finding.get("title", "Untitled"),
+                    finding_file=finding.get("file", source_label),
+                    analysis_unit_id=finding.get("analysis_unit_id"),
+                    reachability=finding.get("reachability"),
+                )
+
+        # Prefer one inter-file ContextPack per distinct runtime surface.  Test-only
+        # units remain in the graph/state but are left to existing applicability
+        # gates through the file fallback path.
+        eligible_units: List[Tuple[AnalysisUnit, set]] = []
+        for unit in analysis_units:
+            if unit.reachability == "test_only":
+                continue
+            unit_scheduled_paths = {
+                os.path.abspath(os.path.join(unit.project_root, file_info.get("path", "")))
+                for file_info in unit.files
+                if file_info.get("path")
+            } & scheduled_paths
+            new_coverage = unit_scheduled_paths - covered_paths
+            if not new_coverage:
+                continue
+            eligible_units.append((unit, new_coverage))
+            covered_paths.update(new_coverage)
+
+        context_pack_char_budget = max(
+            8000,
+            min(60000, int(budget_plan.get("max_context_tokens", profile.get("num_ctx", 8192))) * 3),
+        )
+        if not hasattr(engine, "scan_analysis_unit"):
+            eligible_units = []
+            covered_paths.clear()
+
+        for unit, unit_coverage in eligible_units:
+            ensure_scan_within_deadline(scan_deadline_ts, context="analyze_analysis_unit")
+            if scan_state["should_stop"]:
+                break
+            unit_start = time.time()
+            failed_before = int(scan_state.get("failed_analyses", 0))
+            context_pack = ContextPackBuilder(max_chars=context_pack_char_budget).build(unit)
+            unit_findings = engine.scan_analysis_unit(
+                unit,
+                context_pack=context_pack,
+                analysis_context={"mode_key": resolved_mode_key, "hotspot_reasons": ["inter-file-flow"]},
+            )
+            unit_duration = time.time() - unit_start
+            unit_failed = int(scan_state.get("failed_analyses", 0)) > failed_before
+            if unit_failed:
+                covered_paths.difference_update(unit_coverage)
+            else:
+                telemetry["files_processed"] += len(unit_coverage)
+            add_log(
+                f"🧩 AnalysisUnit analysée: {unit.entrypoint}",
+                "info",
+                stage="analyze",
+                event="analysis_unit_analyzed",
+                analysis_unit_id=unit.id,
+                entrypoint=unit.entrypoint,
+                reachability=unit.reachability,
+                duration_ms=round(unit_duration * 1000, 2),
+                findings=len(unit_findings),
+                covered_files=len(unit_coverage),
+                fallback_required=unit_failed,
+            )
+            record_findings(unit_findings, unit.entrypoint)
         
         for i, file_entry in enumerate(file_entries):
             ensure_scan_within_deadline(scan_deadline_ts, context="analyze")
@@ -3318,6 +3694,21 @@ def run_scan(
             filepath = file_entry.get("path")
             filename = os.path.basename(filepath)
             hotspot_reasons = file_entry.get("reasons", [])
+
+            if os.path.abspath(filepath) in covered_paths:
+                scan_state["progress"] = int(((i + 1) / total_files) * 100)
+                continue
+
+            relative_path = normalize_relative_path(target_dir, filepath)
+            file_reachability = graph_reachability.get(f"file:{relative_path}")
+            reachability_status = file_reachability.status if file_reachability else "not_applicable"
+            structural_hints = list(cross_file_hints if resolved_mode_key == "deep" else [])
+            if file_reachability:
+                structural_hints.insert(
+                    0,
+                    f"ProjectGraph reachability={reachability_status}; reason={file_reachability.reason}. "
+                    "Unknown is not unreachable.",
+                )
             
             # Timeout par fichier selon le mode
             file_start = time.time()
@@ -3327,7 +3718,14 @@ def run_scan(
                 analysis_context={
                     "mode_key": resolved_mode_key,
                     "hotspot_reasons": hotspot_reasons,
-                    "cross_file_hints": cross_file_hints if resolved_mode_key == "deep" else [],
+                    "cross_file_hints": structural_hints,
+                    "reachability": reachability_status,
+                    "call_path": [
+                        project_graph.nodes[node_id].name
+                        for node_id in (file_reachability.path if file_reachability else [])
+                        if project_graph is not None and node_id in project_graph.nodes
+                    ],
+                    "graph_confidence": None,
                 },
             )
             file_duration = time.time() - file_start
@@ -3351,16 +3749,7 @@ def run_scan(
                 add_log(f"⏱️ {filename}: {file_duration:.0f}s (budget: {max_time}s)", "warning")
             
             if vulns:
-                for v in vulns:
-                    v["id"] = len(scan_state["vulnerabilities"]) + 1
-                    scan_state["vulnerabilities"].append(v)
-                    
-                    sev = v["severity"].lower()
-                    if sev in scan_state["stats"]:
-                        scan_state["stats"][sev] += 1
-                    
-                    if v["severity"] in ["Critical", "High"]:
-                        add_log(f"🚨 {v['severity']}: {v['title']} ({filename})", "error")
+                record_findings(vulns, filename)
 
             set_scan_progress("analyze", (i + 1) / total_files)
 

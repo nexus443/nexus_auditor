@@ -4,6 +4,10 @@ Nexus Auditor est une application d'audit de code assisté par IA. Elle associe
 une interface React, une API FastAPI et un serveur Ollama pour analyser un
 dépôt, suivre la progression d'un scan et consulter les résultats.
 
+Nexus Auditor est un projet open source indépendant. Le futur service commercial
+Luneyro Nexus Auditor sera développé et distribué séparément, avec ses propres
+fonctionnalités, son infrastructure et ses conditions commerciales.
+
 ## Fonctions
 
 - Préparation et lancement d'un scan avec profils et modes configurables.
@@ -37,7 +41,8 @@ L'interface est accessible sur <http://localhost:3000> et l'API sur
 <http://localhost:8000> ; sa documentation interactive se trouve sur
 <http://localhost:8000/docs>. La configuration Compose pointe par défaut vers
 Ollama sur `host.docker.internal:11434`. Vérifiez que le serveur est accessible
-depuis le conteneur et sélectionnez un modèle disponible dans l'interface.
+depuis le conteneur. Le modèle utilisé dépend du profil de puissance choisi
+dans l'interface.
 
 Pour arrêter les services :
 
@@ -96,9 +101,8 @@ npm run build
 
 ## License
 
-Les contributions de Nexus Auditor pour lesquelles les droits nécessaires sont
-détenus sont distribuées sous [Apache License 2.0](LICENSE). Les composants et
-ressources tiers conservent leurs propres licences ; voir
+Nexus Auditor est distribué sous [Apache License 2.0](LICENSE). Les composants
+et ressources tiers conservent leurs propres licences ; voir
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 La licence Apache ne concède pas de droit d'utilisation des noms commerciaux,

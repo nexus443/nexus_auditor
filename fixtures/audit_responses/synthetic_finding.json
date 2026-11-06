@@ -1,0 +1,9 @@
+{
+  "title": "Example finding",
+  "severity": "Low",
+  "line": 1,
+  "description": "Synthetic example for testing and documentation; no real audit was performed.",
+  "fix": "Review the example and apply a suitable correction.",
+  "type": "example",
+  "confidence": 0
+}

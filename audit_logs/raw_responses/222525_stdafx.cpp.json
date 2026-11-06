@@ -1,7 +1,0 @@
-{
-    "title": "No Security Vulnerabilities Found",
-    "severity": "None",
-    "line": 0,
-    "description": "The provided code snippet is a standard precompiled header file (stdafx.cpp) and does not contain any obvious security vulnerabilities. It only includes the standard headers.",
-    "fix": "N/A"
-}
